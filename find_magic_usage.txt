@@ -1,0 +1,40 @@
+112:      if(PositionGetInteger(POSITION_MAGIC) == InpMagicNumber)
+146:            request.magic = InpMagicNumber;
+481:input ulong  InpMagicNumber  = 13579;    // Magic number
+1390:         PositionGetInteger(POSITION_MAGIC) == InpMagicNumber)
+1443:   trade.SetExpertMagicNumber(InpMagicNumber);
+2239:            if(PositionSelect(_Symbol) && PositionGetInteger(POSITION_MAGIC) == InpMagicNumber)
+2305:            if(PositionSelect(_Symbol) && PositionGetInteger(POSITION_MAGIC) == InpMagicNumber)
+2338:            if(PositionSelect(_Symbol) && PositionGetInteger(POSITION_MAGIC) == InpMagicNumber)
+2367:            if(PositionSelect(_Symbol) && PositionGetInteger(POSITION_MAGIC) == InpMagicNumber)
+2463:         if(PositionSelect(_Symbol) && PositionGetInteger(POSITION_MAGIC) == InpMagicNumber)
+2497:         if(PositionSelect(_Symbol) && PositionGetInteger(POSITION_MAGIC) == InpMagicNumber)
+2579:            if(PositionSelect(_Symbol) && PositionGetInteger(POSITION_MAGIC) == InpMagicNumber)
+2598:            if(PositionSelect(_Symbol) && PositionGetInteger(POSITION_MAGIC) == InpMagicNumber)
+3158:            OrderGetInteger(ORDER_MAGIC) == InpMagicNumber)
+3178:            OrderGetInteger(ORDER_MAGIC) == InpMagicNumber)
+3204:         OrderGetInteger(ORDER_MAGIC) != InpMagicNumber)
+3229:      if(PositionGetSymbol(i) == _Symbol && PositionGetInteger(POSITION_MAGIC) == InpMagicNumber)
+3360:            OrderGetInteger(ORDER_MAGIC) != InpMagicNumber)
+3478:            OrderGetInteger(ORDER_MAGIC) == InpMagicNumber)
+3819:         PositionGetInteger(POSITION_MAGIC) == InpMagicNumber)
+3908:      if(PositionGetInteger(POSITION_MAGIC) != InpMagicNumber) continue;
+3939:      if(PositionGetSymbol(i) == _Symbol && PositionGetInteger(POSITION_MAGIC) == InpMagicNumber)
+3953:      if(PositionGetInteger(POSITION_MAGIC) != InpMagicNumber) continue;
+3990:         if(PositionGetInteger(POSITION_MAGIC) != InpMagicNumber) continue;
+4613:      if(ticket > 0 && PositionGetInteger(POSITION_MAGIC) == InpMagicNumber)
+4631:         if(ticket > 0 && PositionGetInteger(POSITION_MAGIC) == InpMagicNumber)
+4663:      if(PositionGetInteger(POSITION_MAGIC) != InpMagicNumber) continue;
+4836:      if(PositionGetInteger(POSITION_MAGIC) != InpMagicNumber) continue;
+4997:   spikeTrade.SetExpertMagicNumber(InpMagicNumber);
+5183:      if(PositionGetSymbol(i) == _Symbol && PositionGetInteger(POSITION_MAGIC) == InpMagicNumber)
+5214:      if(PositionGetInteger(POSITION_MAGIC) != InpMagicNumber) continue;
+5497:      if(HistoryDealGetInteger(ticket, DEAL_MAGIC) != InpMagicNumber) continue;
+5547:      if(HistoryDealGetInteger(ticket, DEAL_MAGIC) != InpMagicNumber) continue;
+5568:      if(HistoryDealGetInteger(ticket, DEAL_MAGIC) != InpMagicNumber) continue;
+5602:      if(OrderGetInteger(ORDER_MAGIC) != InpMagicNumber) continue;
+5620:      if(PositionGetTicket(i) > 0 && PositionGetInteger(POSITION_MAGIC) == InpMagicNumber && PositionGetString(POSITION_SYMBOL) == _Symbol)
+5960:      if((int)PositionGetInteger(POSITION_MAGIC) != InpMagicNumber)
+5987:      if(PositionGetTicket(i) > 0 && PositionGetInteger(POSITION_MAGIC) == InpMagicNumber)
+7670:         PositionGetInteger(POSITION_MAGIC) == InpMagicNumber)
+7711:      if(PositionGetInteger(POSITION_MAGIC) == InpMagicNumber)

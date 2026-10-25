@@ -19,7 +19,7 @@ import logging
 import threading
 from typing import Dict, List, Optional, Any
 from datetime import datetime, timezone
-from dataclasses import dataclass, field, field
+from dataclasses import dataclass
 
 try:
     import MetaTrader5 as mt5
@@ -35,7 +35,7 @@ from .risk_manager import RiskManager, RiskLevel
 from .notification import NotificationManager, Notification, EventType
 from .exceptions import OrderError, InvalidStopsError, PositionLimitError
 
-logger = logging.getLogger("tradbot.engine")
+logger = logging.getLogger("tradbot-engine")
 
 
 @dataclass
@@ -81,23 +81,6 @@ class EngineConfig:
     dow_blocking_threshold_pips: float = 80.0  # Maximum 80 pips of DOW offset allowed
     dow_blocking_threshold_coherence: float = 70.0  # Coherence min for DOW block bypass (%
     dow_blocking_strict_entry: bool = True  # Only allow GOOD/PERFECT when DOW block active
-
-    @classmethod
-    def from_dict(cls, config_dict: Dict) -> "EngineConfig":
-        """Crée une configuration EngineConfig à partir d'un dictionnaire."""
-        # Extraire uniquement les champs qui existent dans la classe
-        from dataclasses import fields as dc_fields
-        field_names = {f.name for f in dc_fields(cls)}
-        # Filtrer la config_dict pour ne garder que les champs valides
-        valid_config = {k: v for k, v in config_dict.items() if k in field_names}
-        # Ajouter un attribut pour les blocs Dow par symbole si nécessaire
-        return cls(**valid_config)
-
-    def to_dict(self) -> Dict:
-        """Convertit la configuration EngineConfig en dictionnaire."""
-        from dataclasses import fields as dc_fields
-        field_names = {f.name for f in dc_fields(self.__class__)}
-        return {k: getattr(self, k) for k in field_names if hasattr(self, k)}
 
 
 class TradingEngine:
@@ -145,7 +128,6 @@ class TradingEngine:
         self._stop_event.clear()
         self._thread = threading.Thread(target=self._loop, daemon=True,
                                         name="tradbot-engine")
-        self._thread.start()
         self._running = True
         logger.info(f"🚀 TradBOT Engine started (interval={self.config.scan_interval}s)")
 
@@ -153,7 +135,7 @@ class TradingEngine:
         """Arrête le moteur."""
         self._stop_event.set()
         self._running = False
-        logger.info("🛑 TradBOT Engine stopped")
+        logger.info("[STOP] TradBOT Engine stopped")
 
     def run_once(self) -> Dict:
         """Exécute un cycle complet de trading. Retourne le rapport."""
@@ -319,7 +301,7 @@ class TradingEngine:
                 self.notifier.send_whatsapp(
                     f"⛔ Trade bloqué {sig.symbol}",
                     reason,
-                    EventType.RISK_WARNING, sig.symbol, priority=1
+                    EventType.RISK_[WARNING], sig.symbol, priority=1
                 )
                 continue
 
@@ -392,11 +374,7 @@ class TradingEngine:
         return orders
 
     def _check_closes(self) -> List[Dict]:
-        """Vérifie et ferme les positions sur verdict WAIT avec seuil de perte $1.5.
-
-        Inclut les vérifications de bloc Dow : si un bloc Dow est actif, ignore la fermeture
-        sauf si la cohérence >= 40% (bypass DOW_BLOCK pour GOOD/PERFECT).
-        """
+        """Vérifie et ferme les positions sur verdict WAIT."""
         closes = []
         for symbol, ticket in list(self._active_tickets.items()):
             if self.gom_handler.should_close(symbol):

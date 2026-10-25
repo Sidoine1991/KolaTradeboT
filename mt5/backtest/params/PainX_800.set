@@ -1,0 +1,34 @@
+; Paramètres optimisés pour PainX_800 (volatilité descendante)
+; généré le 2026-10-17
+
+; === GÉNÉRAL ===
+InpMagicNumber=123456
+InpComment="TradBOT PainX_800"
+
+; === GOM VERDICT ===
+UseGOMVerdictFilter=true
+MinGOMVerdictNumAbs=2
+RequireGoodPerfectAlways=true
+BlockEntryWhenAIHold=false
+
+; === RISQUE ===
+MaxLossPerTradeDollars=2.5
+GeneralGiveBackMaxPct=25.0
+GeneralGiveBackMinPeakUSD=0.40
+FirstSpikeGiveBackMaxPct=25.0
+FirstSpikeGiveBackMinPeakUSD=0.25
+
+; === SPIKE ===
+UseSecondSpikeCapture=true
+SpikeCloseMinProfitUSD=0.25
+SpikeCloseKeepPct=75.0
+
+; === TIMEFRAMES ===
+UseM1=true
+UseM5=true
+UseM15=true
+UseH1=true
+
+; === AUTRES ===
+UseStagnationTimeExit=true
+StagnationMaxAgeMinutes=4

@@ -1,0 +1,278 @@
+================================================================================
+GUIDE D'INTÉGRATION DES NOUVEAUX MODULES ALGORITHMIQUES
+================================================================================
+
+RÉSUMÉ DES MODULES CRÉÉS
+-------------------------
+
+Basé sur l'analyse des algorithmes de trading réputés (Myfxbook vérifiés), 
+quatre nouveaux modules ont été créés pour intégrer les patterns identifiés
+dans votre système SMC_Universal actuel.
+
+1. SMC_AdaptiveInstrument.mqh
+   - Pattern: Index Synthetics EA / Scalper Deriv
+   - Fonction: Filtrage adaptatif par catégorie de symbole
+   - Seuils GOM différenciés par instrument (Boom/Crash, Volatility, Forex, etc.)
+   - Ajustement dynamique basé sur la volatilité historique
+
+2. SMC_AdvancedRangeDetection.mqh
+   - Pattern: EA Gold Stuff fix (faiblesse en range)
+   - Fonction: Détection avancée de range avant entrée
+   - WAIT forcé après 2+ ranges plats à pente faible
+   - Détection de breakout imminent
+
+3. SMC_AdvancedRiskManager.mqh
+   - Pattern: Index Synthetics EA + SpikeRider EA
+   - Fonction: Coupe-circuit perte journalière + break-even automatique
+   - Limite de perte journalière configurable (% du solde)
+   - Break-even automatique avec buffer ATR
+   - Déclenchement sur TP partiel optionnel
+
+4. SMC_PatternGOMIntegration.mqh
+   - Pattern: Infinity Trader EA (sentiment + price-action avant verdict)
+   - Fonction: Les figures chartistes influencent le verdict GOM
+   - Plus utilisé comme filtre a posteriori, mais comme influence directe
+   - Override possible si patterns forts et GOM faible
+
+================================================================================
+INTÉGRATION DANS SMC_Universal.mq5
+================================================================================
+
+ÉTAPE 1: Ajouter les includes dans SMC_Universal.mq5
+---------------------------------------------------
+
+Ajouter après les includes existants (vers ligne 1400):
+
+#include "modules/SMC_AdaptiveInstrument.mqh"
+#include "modules/SMC_AdvancedRangeDetection.mqh"
+#include "modules/SMC_AdvancedRiskManager.mqh"
+#include "modules/SMC_PatternGOMIntegration.mqh"
+
+ÉTAPE 2: Initialiser les modules dans OnInit()
+-------------------------------------------
+
+Ajouter dans OnInit() après les autres initialisations:
+
+// Initialiser les nouveaux modules algorithmiques
+SMC_AI_Init();              // Adaptive Instrument
+SMC_Range_Init();           // Advanced Range Detection
+SMC_Risk_Init();            // Advanced Risk Manager
+SMC_PGI_Init();             // Pattern-GOM Integration
+
+ÉTAPE 3: Intégrer le filtrage adaptatif dans les gates d'entrée
+-------------------------------------------------------------
+
+Dans la fonction de validation GOM (SMCGP_GOMValidatesPrimarySignal ou équivalent):
+
+// Remplacer le test de seuil GOM fixe par seuil adaptatif
+double adaptiveThreshold = SMC_AI_AdaptiveGOMThreshold(_Symbol);
+bool gomValid = (MathAbs(gomNum) >= adaptiveThreshold);
+
+ÉTAPE 4: Intégrer la détection de range avant entrée
+---------------------------------------------------
+
+Dans les fonctions d'entrée (PlaceGOMMarketOrder, CanPlacePatientSimpleOrderByGOM, etc.):
+
+// Mettre à jour la détection de range
+SMC_Range_Update(_Symbol, PERIOD_CURRENT);
+
+// Vérifier si l'entrée est autorisée
+if(!SMC_Range_AllowEntry(_Symbol, gomNum)) {
+   Print("🚫 Entrée bloquée par détection de range");
+   return false;
+}
+
+ÉTAPE 5: Intégrer le gestionnaire de risque journalier
+----------------------------------------------------
+
+Dans toutes les fonctions d'ouverture de position:
+
+// Vérifier si le trading est autorisé
+if(!SMC_Risk_AllowTrade()) {
+   Print("🚫 Trading bloqué par gestionnaire de risque");
+   return false;
+}
+
+// Enregistrer le trade après ouverture
+SMC_Risk_RecordTrade(profit);
+
+Dans OnTick() ou OnTimer():
+
+// Gérer le break-even automatique pour toutes les positions
+SMC_Risk_ManageAllBreakEven();
+
+// Afficher le dashboard de risque
+SMC_Risk_ShowDashboard();
+
+ÉTAPE 6: Intégrer l'influence des patterns sur le verdict GOM
+-------------------------------------------------------------
+
+Dans le pipeline GOM (SMCGP_PollGOM ou équivalent):
+
+// Ajuster le verdict GOM avec les patterns
+int adjustedGOMNum = SMC_PGI_AdjustGOMVerdict(originalGOMNum, _Symbol, PERIOD_CURRENT);
+
+// Utiliser adjustedGOMNum au lieu de originalGOMNum pour la décision
+
+Dans OnTick() ou OnTimer():
+
+// Afficher le dashboard d'intégration Patterns-GOM
+SMC_PGI_ShowDashboard();
+
+ÉTAPE 7: Nettoyage dans OnDeinit()
+----------------------------------
+
+Ajouter dans OnDeinit():
+
+// Nettoyer les objets graphiques
+SMC_Range_ClearObjects();
+SMC_PGI_ClearDashboard();
+
+================================================================================
+PARAMÈTRES CONFIGURABLES
+================================================================================
+
+SMC_AdaptiveInstrument.mqh
+--------------------------
+- Configuré automatiquement par catégorie de symbole
+- Ajustement dynamique basé sur volatilité historique
+- Pas de paramètres input supplémentaires nécessaires
+
+SMC_AdvancedRangeDetection.mqh
+-------------------------------
+input int    InpRangeLookback        = 20;    // Nombre de bougies pour détecter range
+input double InpRangeWidthATRMax    = 0.8;   // Largeur max range (en ATR)
+input double InpRangeSlopeThreshold  = 0.05;  // Seuil de pente pour range "plat"
+input int    InpFlatRangeWaitBars   = 2;     // Nombre de ranges plats avant WAIT forcé
+input double InpBreakoutThreshold   = 1.5;   // Seuil ATR pour confirmer breakout
+input int    InpRangeMinBars        = 10;    // Nombre minimum de bougies pour confirmer range
+
+SMC_AdvancedRiskManager.mqh
+----------------------------
+input double InpDailyLossLimitPct   = 5.0;   // Limite perte journalière (% du solde)
+input double InpDailyTargetPct     = 5.0;   // Objectif profit journalier (% du solde)
+input double InpMaxDrawdownPct     = 3.0;   // Drawdown max journalier (% du solde)
+input int    InpMaxTradesPerDay    = 20;    // Nombre max de trades par jour
+input bool   InpEnableDailyStop    = true;  // Activer arrêt journalier
+input bool   InpEnableBreakEven    = true;  // Activer break-even automatique
+input double InpBETriggerATR       = 0.5;   // Déclencheur BE (ATR)
+input double InpBEBufferATR        = 0.1;   // Buffer BE (ATR)
+input bool   InpBEMoveOnTP         = true;  // Déplacer BE sur TP partiel
+input int    InpBEPartialTPPercent = 50;    // % TP pour déclencher BE
+
+SMC_PatternGOMIntegration.mqh
+-----------------------------
+input double InpPatternGOMWeight     = 0.3;   // Poids des patterns dans le verdict GOM (0-1)
+input double InpPatternConfluenceMin = 60.0;  // Confluence minimale pour influencer GOM
+input int    InpStrongPatternMin    = 2;     // Nombre minimum de patterns forts requis
+input bool   InpPatternOverrideWeak  = true;  // Patterns forts peuvent override GOM faible
+input double InpPatternBonusThreshold = 2.0;  // Seuil GOM pour bonus patterns
+
+================================================================================
+FONCTIONS API PRINCIPALES
+================================================================================
+
+SMC_AdaptiveInstrument.mqh
+--------------------------
+SMC_AI_Init()                              // Initialisation
+SMC_AI_GetConfig(symbol)                   // Obtenir configuration pour symbole
+SMC_AI_AdaptiveGOMThreshold(symbol)        // Seuil GOM adaptatif
+SMC_AI_VolatilityMultiplier(symbol)        // Multiplicateur volatilité pour SL/TP
+SMC_AI_GOMValidatesAdaptive(symbol, gomNum) // Validation GOM avec seuil adaptatif
+
+SMC_AdvancedRangeDetection.mqh
+------------------------------
+SMC_Range_Init()                           // Initialisation
+SMC_Range_Update(symbol, tf)               // Mettre à jour détection range
+SMC_Range_IsInRange()                      // Prix dans range?
+SMC_Range_IsFlatRange()                    // Range plat?
+SMC_Range_ShouldForceWait()                // Doit forcer WAIT?
+SMC_Range_AllowEntry(symbol, gomNum)       // Autoriser entrée?
+SMC_Range_Draw(symbol, tf)                 // Dessiner bornes range
+SMC_Range_ClearObjects()                   // Nettoyer objets
+
+SMC_AdvancedRiskManager.mqh
+----------------------------
+SMC_Risk_Init()                            // Initialisation
+SMC_Risk_Update()                          // Mettre à jour état risque
+SMC_Risk_AllowTrade()                      // Autoriser trading?
+SMC_Risk_RecordTrade(profit)               // Enregistrer trade
+SMC_Risk_ManageBreakEven(ticket)           // Gérer BE pour position
+SMC_Risk_ManageAllBreakEven()              // Gérer BE pour toutes positions
+SMC_Risk_GetState()                        // Obtenir état complet
+SMC_Risk_GetDailyPnL()                     // Obtenir PnL journalier
+SMC_Risk_IsDailyLossHit()                  // Limite perte atteinte?
+SMC_Risk_ShowDashboard()                   // Afficher dashboard
+
+SMC_PatternGOMIntegration.mqh
+-----------------------------
+SMC_PGI_Init()                             // Initialisation
+SMC_PGI_Update(symbol, tf)                // Mettre à jour état patterns
+SMC_PGI_AdjustGOMVerdict(gomNum, symbol, tf) // Ajuster verdict GOM
+SMC_PGI_PatternsConfirmGOM(gomNum)         // Patterns confirment GOM?
+SMC_PGI_GetPatternConfluence()             // Obtenir confluence
+SMC_PGI_GetPatternDirection()              // Obtenir direction patterns
+SMC_PGI_ShowDashboard()                    // Afficher dashboard
+SMC_PGI_ClearDashboard()                   // Nettoyer dashboard
+
+================================================================================
+TESTS ET VALIDATION
+================================================================================
+
+1. Tester le filtrage adaptatif par instrument
+   - Vérifier que les seuils GOM diffèrent par catégorie
+   - Tester sur Boom/Crash, Volatility, Forex, Gold
+   - Vérifier l'ajustement dynamique avec volatilité
+
+2. Tester la détection de range
+   - Vérifier la détection de range sur marché plat
+   - Tester le WAIT forcé après 2 ranges plats
+   - Vérifier la détection de breakout imminent
+
+3. Tester le gestionnaire de risque
+   - Simuler perte journalière pour vérifier arrêt
+   - Tester le break-even automatique
+   - Vérifier le dashboard de risque
+
+4. Tester l'intégration Patterns-GOM
+   - Vérifier l'ajustement du verdict GOM
+   - Tester l'override avec patterns forts
+   - Vérifier la confirmation de GOM par patterns
+
+================================================================================
+NOTES IMPORTANTES
+================================================================================
+
+- Grid/martingale: TOUJOURS désactivé par défaut (allowGridTrading = false)
+- Les modules sont conçus pour être non-intrusifs: ils s'intègrent sans 
+  modifier la logique existante, seulement en ajoutant des filtres
+- Les paramètres par défaut sont conservateurs pour la sécurité
+- Les dashboards sont optionnels et peuvent être désactivés
+- Le break-even automatique améliore le ratio risque/rendement sans 
+  compromettre le potentiel de gain
+
+================================================================================
+RÉFÉRENCES ALGORITHMES ANALYSÉS
+================================================================================
+
+1. Night Hunter Pro (Myfxbook vérifié: +215% depuis 2020, DD 30%)
+   - Session asiatique, faible volatilité
+   → Pattern: Filtrage adaptatif par volatilité
+
+2. Infinity Trader EA (Myfxbook vérifié: +84.69%, DD 18.94%, WR 73%)
+   - Reconnaissance price-action + filtre sentiment LLM
+   → Pattern: Patterns influencent verdict (pas seulement filtre)
+
+3. EA Gold Stuff (500+ avis, 4+ étoiles)
+   - Faiblesse connue en range (grid strategy)
+   → Pattern: Détection range avant entrée + WAIT forcé
+
+4. Index Synthetics EA (Deriv)
+   - Logique par instrument, filtres adaptatifs
+   → Pattern: Configuration différenciée par catégorie
+
+5. SpikeRider EA
+   - Coupe-circuit perte journalière + break-even auto
+   → Pattern: Gestion risque avancée
+
+================================================================================

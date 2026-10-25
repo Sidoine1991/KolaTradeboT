@@ -1,0 +1,25 @@
+Rapport de classification :
+              precision    recall  f1-score   support
+
+           0       1.00      1.00      1.00     39109
+           1       1.00      1.00      1.00     39109
+
+    accuracy                           1.00     78218
+   macro avg       1.00      1.00      1.00     78218
+weighted avg       1.00      1.00      1.00     78218
+
+Matrice de confusion :
+[[39088    21]
+ [    0 39109]]
+Importance des features :
+return: 0.0481
+abs_return: 0.0420
+volatility_10: 0.1581
+volatility_20: 0.2166
+since_last_spike: 0.0000
+seq_return_3: 0.0540
+seq_return_5: 0.0551
+rsi_14: 0.0736
+bb_upper: 0.0363
+bb_lower: 0.0403
+bb_width: 0.2760

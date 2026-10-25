@@ -1,0 +1,228 @@
+//+------------------------------------------------------------------+
+//| AI_Limit_Orders.mqh - Gestion des ordres limit basés sur l'IA     |
+//+------------------------------------------------------------------+
+#property copyright "Copyright 2024, TradBot"
+#property link      ""
+#property version   "1.00"
+
+//+------------------------------------------------------------------+
+//| Traitement des résultats d'analyse IA pour ordres limit            |
+//+------------------------------------------------------------------+
+void ProcessAIAAnalysisForLimitOrders(string aiAction, double confidence, string reason, double suggestedPrice)
+{
+   // Vérifier si on peut placer de nouveaux ordres limit
+   if(GetActiveAILimitOrderCount() >= 3)
+   {
+      Print("Maximum d'ordres limit IA atteint (3)");
+      return;
+   }
+   
+   // Vérifier la confiance minimale
+   if(confidence < 0.7) // Minimum 70% de confiance
+   {
+      Print("Confiance IA trop faible: ", DoubleToString(confidence, 2), "% < 70%");
+      return;
+   }
+   
+   // Déterminer le type d'ordre
+   bool isBuy = (aiAction == "buy" || aiAction == "BUY");
+   
+   // Calculer le prix si non fourni
+   double price = suggestedPrice;
+   if(price <= 0)
+   {
+      double currentAsk = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+      double currentBid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+      double currentPrice = isBuy ? currentAsk : currentBid;
+      
+      // Placer l'ordre limit à une distance raisonnable du prix actuel
+      double atr = iATR(_Symbol, PERIOD_CURRENT, 14);
+      double offset = atr * 0.5; // 0.5 ATR de distance
+      
+      price = isBuy ? currentPrice - offset : currentPrice + offset;
+   }
+   
+   // Calculer la taille du lot
+   double lotSize = CalculateLot(iATR(_Symbol, PERIOD_CURRENT, 14));
+   lotSize *= confidence; // Ajuster selon la confiance
+   
+   // Placer l'ordre limit
+   PlaceAILimitOrder(isBuy, price, lotSize, reason, confidence);
+}
+
+//+------------------------------------------------------------------+
+//| Placement d'un ordre limit basé sur l'IA                         |
+//+------------------------------------------------------------------+
+bool PlaceAILimitOrder(bool isBuy, double price, double lotSize, string reason, double confidence)
+{
+   CTrade aiTrade;
+   ENUM_ORDER_TYPE orderType = isBuy ? ORDER_TYPE_BUY_LIMIT : ORDER_TYPE_SELL_LIMIT;
+   
+   // Normaliser le prix
+   price = NormalizeDouble(price, _Digits);
+   lotSize = NormalizeDouble(lotSize, 2);
+   
+   // Calculer SL et TP
+   double atr = iATR(_Symbol, PERIOD_CURRENT, 14);
+   double sl = 0, tp = 0;
+   
+   if(isBuy)
+   {
+      sl = price - atr * 2.0; // SL à 2 ATR
+      tp = price + atr * 3.0; // TP à 3 ATR
+   }
+   else
+   {
+      sl = price + atr * 2.0; // SL à 2 ATR
+      tp = price - atr * 3.0; // TP à 3 ATR
+   }
+   
+   // Valider et ajuster les stops
+   if(!ValidateAndAdjustStops(_Symbol, orderType, price, sl, tp))
+   {
+      Print("Stops invalides pour ordre limit IA");
+      return false;
+   }
+   
+   // Placer l'ordre
+   string comment = "AI_LIMIT_" + (isBuy ? "BUY" : "SELL") + "_" + DoubleToString(confidence, 2);
+   
+   if(aiTrade.OrderOpen(orderType, _Symbol, lotSize, price, sl, tp, ORDER_TIME_GTC, 0, comment))
+   {
+      // Ajouter à la liste des ordres IA
+      int index = g_aiLimitOrderCount;
+      if(index < 3)
+      {
+         g_aiLimitOrders[index].price = price;
+         g_aiLimitOrders[index].lotSize = lotSize;
+         g_aiLimitOrders[index].isBuy = isBuy;
+         g_aiLimitOrders[index].createTime = TimeCurrent();
+         g_aiLimitOrders[index].reason = reason;
+         g_aiLimitOrders[index].confidence = confidence;
+         g_aiLimitOrders[index].isActive = true;
+         g_aiLimitOrderCount++;
+         
+         Print("Ordre limit IA placé: ", isBuy ? "BUY" : "SELL", 
+               " @", DoubleToString(price, _Digits),
+               " Lot:", DoubleToString(lotSize, 2),
+               " Conf:", DoubleToString(confidence * 100, 1), "%");
+      }
+      
+      return true;
+   }
+   else
+   {
+      Print("Échec placement ordre limit IA: ", aiTrade.ResultRetcode(), " - ", aiTrade.ResultRetcodeDescription());
+      return false;
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Gestion des ordres limit IA actifs                                |
+//+------------------------------------------------------------------+
+void ManageAILimitOrders()
+{
+   // Parcourir les ordres IA et mettre à jour leur statut
+   for(int i = 0; i < g_aiLimitOrderCount; i++)
+   {
+      if(!g_aiLimitOrders[i].isActive) continue;
+      
+      // Vérifier si l'ordre a été exécuté ou a expiré
+      ulong orderTicket = 0;
+      
+      // Chercher l'ordre correspondant
+      for(int j = 0; j < OrdersTotal(); j++)
+      {
+         if(OrderSelect(j))
+         {
+            if(StringFind(OrderGetString(ORDER_COMMENT), "AI_LIMIT") >= 0)
+            {
+               double orderPrice = OrderGetDouble(ORDER_PRICE_OPEN);
+               bool orderIsBuy = (OrderGetInteger(ORDER_TYPE) == ORDER_TYPE_BUY_LIMIT);
+               
+               // Vérifier si c'est le même ordre
+               if(MathAbs(orderPrice - g_aiLimitOrders[i].price) < _Point * 10 && 
+                  orderIsBuy == g_aiLimitOrders[i].isBuy)
+               {
+                  orderTicket = OrderGetInteger(ORDER_TICKET);
+                  break;
+               }
+            }
+         }
+      }
+      
+      // Si l'ordre n'existe plus, le marquer comme inactif
+      if(orderTicket == 0)
+      {
+         g_aiLimitOrders[i].isActive = false;
+         Print("Ordre limit IA terminé pour: ", g_aiLimitOrders[i].reason);
+      }
+   }
+   
+   // Nettoyer les ordres inactifs
+   for(int i = g_aiLimitOrderCount - 1; i >= 0; i--)
+   {
+      if(!g_aiLimitOrders[i].isActive)
+      {
+         // Déplacer les éléments restants
+         for(int j = i; j < g_aiLimitOrderCount - 1; j++)
+         {
+            g_aiLimitOrders[j] = g_aiLimitOrders[j + 1];
+         }
+         g_aiLimitOrderCount--;
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Annuler tous les ordres limit IA                                  |
+//+------------------------------------------------------------------+
+void CancelAllAILimitOrders()
+{
+   CTrade aiTrade;
+   
+   for(int i = 0; i < OrdersTotal(); i++)
+   {
+      if(OrderSelect(i))
+      {
+         string comment = OrderGetString(ORDER_COMMENT);
+         if(StringFind(comment, "AI_LIMIT") >= 0)
+         {
+            ulong ticket = OrderGetInteger(ORDER_TICKET);
+            aiTrade.OrderDelete(ticket);
+            Print("Annulation ordre limit IA ticket: ", ticket);
+         }
+      }
+   }
+   
+   // Réinitialiser le tableau
+   g_aiLimitOrderCount = 0;
+   for(int i = 0; i < 3; i++)
+   {
+      g_aiLimitOrders[i].price = 0;
+      g_aiLimitOrders[i].lotSize = 0;
+      g_aiLimitOrders[i].isBuy = false;
+      g_aiLimitOrders[i].createTime = 0;
+      g_aiLimitOrders[i].reason = "";
+      g_aiLimitOrders[i].confidence = 0;
+      g_aiLimitOrders[i].isActive = false;
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Compter les ordres limit IA actifs                                 |
+//+------------------------------------------------------------------+
+int GetActiveAILimitOrderCount()
+{
+   int count = 0;
+   
+   for(int i = 0; i < g_aiLimitOrderCount; i++)
+   {
+      if(g_aiLimitOrders[i].isActive)
+         count++;
+   }
+   
+   return count;
+}
+
+//+------------------------------------------------------------------+

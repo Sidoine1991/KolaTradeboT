@@ -1,0 +1,75 @@
+================================================================================
+GUIDE DE BACKTEST SMC UNIVERSAL
+================================================================================
+Date: 2026-09-20
+EA: SMC Universal avec Opportunity Filter + GOM Trust System
+================================================================================
+
+CONFIGURATION DES BACKTESTS
+================================================================================
+
+Symboles a tester:
+1. Boom 1000 Index (M1) - 2024-01-01 a 2024-09-20 - Depot: 1000$ - Levier: 1:100
+2. Crash 1000 Index (M1) - 2024-01-01 a 2024-09-20 - Depot: 1000$ - Levier: 1:100
+3. Boom 300 Index (M1) - 2024-01-01 a 2024-09-20 - Depot: 1000$ - Levier: 1:100
+4. Crash 300 Index (M1) - 2024-01-01 a 2024-09-20 - Depot: 1000$ - Levier: 1:100
+5. PainX 100 Index (M1) - 2024-01-01 a 2024-09-20 - Depot: 1000$ - Levier: 1:100
+6. GainX 100 Index (M1) - 2024-01-01 a 2024-09-20 - Depot: 1000$ - Levier: 1:100
+7. EURUSD (M5) - 2024-01-01 a 2024-09-20 - Depot: 10000$ - Levier: 1:100
+8. GBPUSD (M5) - 2024-01-01 a 2024-09-20 - Depot: 10000$ - Levier: 1:100
+9. XAUUSD (M5) - 2024-01-01 a 2024-09-20 - Depot: 10000$ - Levier: 1:100
+10. US30 (M5) - 2024-01-01 a 2024-09-20 - Depot: 10000$ - Levier: 1:100
+
+================================================================================
+INSTRUCTIONS POUR CHAQUE BACKTEST
+================================================================================
+
+1. OUVRIR MT5
+   - Lancer MetaTrader 5
+   - Se connecter au terminal souhaite
+
+2. OUVRIR STRATEGY TESTER
+   - Appuyer sur F4 (MetaEditor)
+   - Dans MetaEditor, appuyer sur F4 (Strategy Tester)
+   - OU: Dans MT5, cliquer sur "View" -> "Strategy Tester"
+
+3. CONFIGURER LE BACKTEST
+   - EA: SMC_Universal
+   - Symbole: [selon la liste ci-dessus]
+   - Timeframe: [selon la liste ci-dessus]
+   - Model: "Every tick" (recommande pour precision)
+   - Use date: Cocher
+   - From: 2024-01-01
+   - To: 2024-09-20
+   - Deposit: [selon la liste ci-dessus]
+   - Currency: USD
+   - Leverage: [selon la liste ci-dessus]
+
+4. PARAMETRES EA IMPORTANTS
+   - UseOpportunityFilter: true
+   - UseGOMTrustSystem: true
+   - MinVolatilityATR: 0.5
+   - MaxConsecutiveLosses: 3
+   - CooldownAfterLossMin: 30
+   - UseSessionFilter: true
+   - MinTradesBeforeTrust: 5
+   - MinTrustScore: 0.4
+   - AutoBlockLowTrust: true
+
+5. LANCER LE BACKTEST
+   - Cliquer sur "Start"
+   - Attendre la fin (peut prendre plusieurs minutes par symbole)
+
+6. EXPORTER LES RESULTATS
+   - Dans l'onglet "Results"
+   - Clic droit -> "Save as Report"
+   - Enregistrer dans: D:\Dev\TradBOT\backtest_results\[SYMBOL]_backtest.html
+   - OU: Clic droit -> "Save as Detailed Report" pour plus de details
+
+7. REPETER POUR CHAQUE SYMBOLE
+   - Suivre la liste ci-dessus
+   - Exporter chaque resultat avec le nom du symbole
+
+================================================================================
+REPERTOIRE DES RESULTATS
+================================================================================

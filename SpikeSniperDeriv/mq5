@@ -1,0 +1,164 @@
+//+------------------------------------------------------------------+
+//|                                           SpikeSniperDeriv.mq5   |
+//|                                  Copyright 2026, Manus AI        |
+//|                                             https://manus.im     |
+//+------------------------------------------------------------------+
+#property copyright "Copyright 2026, Manus AI"
+#property link      "https://manus.im"
+#property version   "1.00"
+#property strict
+
+//--- Inclure les classes de trading
+#include <Trade\Trade.mqh>
+
+//--- Paramètres d'entrée
+input group "Paramètres de Détection"
+input double InpSpikeThreshold = 1.0;    // Seuil de Spike (en points)
+input int    InpDelaySeconds    = 2;      // Délai après Spike (secondes)
+
+input group "Paramètres de Trading"
+input double InpLotSize         = 0.2;    // Taille du lot
+input int    InpTakeProfit      = 100;    // Take Profit (en points)
+input int    InpStopLoss        = 50;     // Stop Loss (en points)
+input int    InpMagicNumber     = 123456; // Numéro magique
+
+input group "Gestion du Risque"
+input int    InpMaxOpenTrades   = 1;      // Nombre max de trades ouverts
+
+//--- Variables globales
+CTrade  trade;
+double  lastTickPrice = 0;
+datetime lastSpikeTime = 0;
+bool    spikeDetected = false;
+ENUM_SYMBOL_INFO_INTEGER symbolType; // BOOM ou CRASH
+
+//+------------------------------------------------------------------+
+//| Expert initialization function                                   |
+//+------------------------------------------------------------------+
+int OnInit()
+{
+   // Déterminer si c'est un indice Boom ou Crash
+   string name = Symbol();
+   if(StringFind(name, "BOOM", 0) >= 0 || StringFind(name, "Boom", 0) >= 0)
+      symbolType = SYMBOL_TRADE_MODE_LONGONLY; // Simplification pour la logique
+   else if(StringFind(name, "CRASH", 0) >= 0 || StringFind(name, "Crash", 0) >= 0)
+      symbolType = SYMBOL_TRADE_MODE_SHORTONLY;
+   else
+   {
+      Print("Erreur: Cet expert est conçu uniquement pour les indices Boom et Crash de Deriv.");
+      return(INIT_FAILED);
+   }
+
+   trade.SetExpertMagicNumber(InpMagicNumber);
+   lastTickPrice = SymbolInfoDouble(Symbol(), SYMBOL_LAST);
+   
+   Print("SpikeSniperDeriv initialisé sur ", name);
+   return(INIT_SUCCEEDED);
+}
+
+//+------------------------------------------------------------------+
+//| Expert deinitialization function                                 |
+//+------------------------------------------------------------------+
+void OnDeinit(const int reason)
+{
+   Print("SpikeSniperDeriv désactivé.");
+}
+
+//+------------------------------------------------------------------+
+//| Expert tick function                                             |
+//+------------------------------------------------------------------+
+void OnTick()
+{
+   MqlTick currentTick;
+   if(!SymbolInfoTick(Symbol(), currentTick)) return;
+
+   double currentPrice = currentTick.last;
+   
+   // 1. Détection de Spike
+   if(lastTickPrice > 0)
+   {
+      double diff = currentPrice - lastTickPrice;
+      
+      // Logique pour BOOM (Spike vers le haut)
+      if(symbolType == SYMBOL_TRADE_MODE_LONGONLY && diff >= InpSpikeThreshold)
+      {
+         Print("Spike BOOM détecté! Diff: ", diff);
+         lastSpikeTime = TimeCurrent();
+         spikeDetected = true;
+      }
+      // Logique pour CRASH (Spike vers le bas)
+      else if(symbolType == SYMBOL_TRADE_MODE_SHORTONLY && diff <= -InpSpikeThreshold)
+      {
+         Print("Spike CRASH détecté! Diff: ", diff);
+         lastSpikeTime = TimeCurrent();
+         spikeDetected = true;
+      }
+   }
+   
+   lastTickPrice = currentPrice;
+
+   // 2. Logique d'Entrée Sniper (après délai)
+   if(spikeDetected)
+   {
+      datetime now = TimeCurrent();
+      if(now >= lastSpikeTime + InpDelaySeconds)
+      {
+         ExecuteSniperEntry();
+         spikeDetected = false; // Réinitialiser après tentative d'entrée
+      }
+   }
+   
+   // 3. Gestion des positions ouvertes (clôture automatique si nécessaire)
+   ManageOpenPositions();
+}
+
+//+------------------------------------------------------------------+
+//| Exécuter l'entrée Sniper                                         |
+//+------------------------------------------------------------------+
+void ExecuteSniperEntry()
+{
+   // Vérifier le nombre de positions ouvertes
+   if(PositionsTotal() >= InpMaxOpenTrades) return;
+
+   double price = SymbolInfoDouble(Symbol(), SYMBOL_ASK);
+   double sl = 0, tp = 0;
+
+   if(symbolType == SYMBOL_TRADE_MODE_LONGONLY) // BOOM -> BUY
+   {
+      price = SymbolInfoDouble(Symbol(), SYMBOL_ASK);
+      sl = price - InpStopLoss * _Point;
+      tp = price + InpTakeProfit * _Point;
+      
+      if(trade.Buy(InpLotSize, Symbol(), price, sl, tp, "Spike Sniper Entry"))
+         Print("Entrée Sniper BUY exécutée sur Boom.");
+   }
+   else if(symbolType == SYMBOL_TRADE_MODE_SHORTONLY) // CRASH -> SELL
+   {
+      price = SymbolInfoDouble(Symbol(), SYMBOL_BID);
+      sl = price + InpStopLoss * _Point;
+      tp = price - InpTakeProfit * _Point;
+      
+      if(trade.Sell(InpLotSize, Symbol(), price, sl, tp, "Spike Sniper Entry"))
+         Print("Entrée Sniper SELL exécutée sur Crash.");
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Gérer les positions ouvertes                                     |
+//+------------------------------------------------------------------+
+void ManageOpenPositions()
+{
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(PositionSelectByTicket(ticket))
+      {
+         if(PositionGetInteger(POSITION_MAGIC) == InpMagicNumber)
+         {
+            // Ici, on peut ajouter une logique de sortie personnalisée 
+            // ou laisser le TP/SL géré par le serveur de Deriv.
+         }
+      }
+   }
+}
+//+------------------------------------------------------------------+

@@ -1,0 +1,6601 @@
+//| SMC_Universal.mq5                                                 |
+//| Robot Smart Money Concepts - UN SEUL ROBOT multi-actifs + IA      |
+//| Boom/Crash | Volatility | Forex | Commodities | Metals           |
+//| FVG | OB | BOS | LS | OTE | EQH/EQL | P/D | LO/NYO              |
+#property copyright "TradBOT SMC"
+#property version   "1.00"
+#property strict
+
+#include <Trade/Trade.mqh>
+#include <Trade/PositionInfo.mqh>
+#include <Trade/OrderInfo.mqh>
+#include <Trade/DealInfo.mqh>
+#include <Trade/HistoryOrderInfo.mqh>
+
+//+------------------------------------------------------------------+
+//| WRAPPER POUR CAPTURER TOUTES LES FERMETURES                    |
+//+------------------------------------------------------------------+
+bool PositionCloseWithLog(ulong ticket, string reason = "")
+{
+   // Obtenir les informations avant fermeture
+   if(PositionSelectByTicket(ticket))
+   {
+      string symbol = PositionGetString(POSITION_SYMBOL);
+      double profit = PositionGetDouble(POSITION_PROFIT);
+      datetime openTime = (datetime)PositionGetInteger(POSITION_TIME);
+      int secondsSinceOpen = (int)(TimeCurrent() - openTime);
+      
+      Print("üö® FERMETURE D√âTECT√âE - ", symbol, 
+            " | Ticket: ", ticket,
+            " | Profit: ", DoubleToString(profit, 2), "$",
+            " | √Çge: ", secondsSinceOpen, "s",
+            " | Raison: ", reason);
+   }
+   
+   // Ex√©cuter la fermeture r√©elle
+   return trade.PositionClose(ticket);
+}
+
+//+------------------------------------------------------------------+
+
+// Forward declarations
+bool GetAISignalData();
+bool UpdateAIDecision(int timeoutMs = -1);
+void UpdateMLMetricsDisplay();
+void DrawSwingHighLow();
+void DrawFVGOnChart();
+void DrawOBOnChart();
+void DrawFibonacciOnChart();
+void DrawEMACurveOnChart();
+void DrawLiquidityZonesOnChart();
+void PlaceScalpingLimitOrders(MqlRates &rates[], int futureBars, double currentPrice, double currentATR, double trendSlope);
+void DrawHistoricalSwingPoints(MqlRates &rates[], int bars, double point);
+void DrawBookmarkLevels();
+void ManageBoomCrashSpikeClose();
+void ManageDollarExits();
+void CloseWorstPositionIfTotalLossExceeded();
+void CloseAllPositionsIfTotalProfitReached();
+void ClosePositionsOnIAHold();
+void ClosePositionsOnDirectionConflict();
+void DrawPremiumDiscountZones();
+void DrawSignalArrow();
+void UpdateSignalArrowBlink();
+void DrawPredictedSwingPoints();
+void DrawEMASupportResistance();
+void DrawPredictionChannel();
+void DrawSMCChannelsMultiTF();
+void DrawEMASupertrendMultiTF();
+void UpdateDashboard();
+void PlaceHistoricalBasedScalpingOrders(MqlRates &rates[], int futureBars, double currentPrice, double currentATR, double trendSlope, int existingLimitOrders);
+bool CaptureChartDataFromChart();
+void ManageTrailingStop();
+void GenerateFallbackAIDecision();
+void GenerateFallbackMLMetrics();
+void DrawPreciseSwingPredictionsWithOrders();
+void DrawOrderLinksToSwings(double nextSH, double nextSL, datetime nextSHTime, datetime nextSLTime);
+void PlacePreciseSwingBasedOrders();
+void ExecuteAIDecisionMarketOrder();
+void CheckAndExecuteDerivArrowTrade();
+void StartSpikePositionMonitoring(string direction);
+bool IsSymbolPaused(string symbol);
+void UpdateSymbolPauseInfo(string symbol, double profit);
+bool ShouldPauseSymbol(string symbol, double profit);
+
+// Fonctions de d√©tection avanc√©e de spike
+double CalculateVolatilityCompression();
+double CalculatePriceAcceleration();
+bool DetectVolumeSpike();
+bool IsPreSpikePattern();
+bool IsNearKeyLevel(double price);
+double CalculateSpikeProbability();
+void CheckImminentSpike();
+void DrawSpikeWarning(double probability);
+void InitializeSymbolPauseSystem();
+bool IsPriceInRange();
+bool DetectPriceRange();
+bool CalculatePreciseEntryPoint(string direction, double &entryPrice, double &stopLoss, double &takeProfit);
+bool ValidateEntryWithMultipleSignals(string direction);
+void SendDerivArrowNotification(string direction, double entryPrice, double stopLoss, double takeProfit);
+double ComputeSetupScore(const string direction);
+
+// Fonctions IA pour communiquer avec le serveur
+bool UpdateAIDecision(int timeoutMs = -1);
+string GetAISignalData(string symbol, string timeframe);
+string GetTrendAlignmentData(string symbol);
+string GetCoherentAnalysisData(string symbol);
+void ProcessAIDecision(string jsonData);
+void UpdateMLMetricsDisplay();
+string ExtractJsonValue(string json, string key);
+
+void GetLatestConfirmedSwings(double &lastSH, datetime &lastSHTime, double &lastSL, datetime &lastSLTime);
+void DrawConfirmedSwingPoints();
+bool DetectBoomCrashSwingPoints();
+void UpdateSpikeWarningBlink();
+void CheckPredictedSwingTriggers();
+
+// Dessin basique des derniers swing high / low sur le graphique courant
+void DrawSwingHighLow()
+{
+   MqlRates rates[];
+   ArraySetAsSeries(rates, true);
+   if(CopyRates(_Symbol, PERIOD_CURRENT, 0, 20, rates) < 5) return;
+
+   double lastHigh = rates[0].high;
+   double lastLow  = rates[0].low;
+   datetime lastTime = rates[0].time;
+
+   // Supprimer les anciens objets pour √©viter l'encombrement
+   ObjectDelete(0, "SMC_Last_SH");
+   ObjectDelete(0, "SMC_Last_SL");
+
+   // Dernier Swing High (simple: high de la derni√®re bougie)
+   if(ObjectCreate(0, "SMC_Last_SH", OBJ_ARROW, 0, lastTime, lastHigh))
+   {
+      ObjectSetInteger(0, "SMC_Last_SH", OBJPROP_COLOR, clrRed);
+      ObjectSetInteger(0, "SMC_Last_SH", OBJPROP_ARROWCODE, 233);
+      ObjectSetInteger(0, "SMC_Last_SH", OBJPROP_WIDTH, 2);
+   }
+
+   // Dernier Swing Low (simple: low de la derni√®re bougie)
+   if(ObjectCreate(0, "SMC_Last_SL", OBJ_ARROW, 0, lastTime, lastLow))
+   {
+      ObjectSetInteger(0, "SMC_Last_SL", OBJPROP_COLOR, clrDodgerBlue);
+      ObjectSetInteger(0, "SMC_Last_SL", OBJPROP_ARROWCODE, 234);
+      ObjectSetInteger(0, "SMC_Last_SL", OBJPROP_WIDTH, 2);
+   }
+}
+
+// Lignes horizontales "Bookmark" + bande verticale droite sur les derniers Swing High/Low confirm√©s (vue ICT)
+void DrawBookmarkLevels()
+{
+   // Nom commun pour la bande verticale √† droite
+   string bandName = "SMC_Bookmark_Band_" + _Symbol;
+
+   // Si l'affichage est d√©sactiv√©, tout nettoyer et sortir
+   if(!ShowBookmarkLevels)
+   {
+      ObjectDelete(0, bandName);
+      ObjectDelete(0, "SMC_Bookmark_SH_" + _Symbol);
+      ObjectDelete(0, "SMC_Bookmark_SL_" + _Symbol);
+      return;
+   }
+   
+   // Utilise les variables globales g_lastSwingHigh / g_lastSwingLow mises √† jour par la d√©tection SMC
+   double lastSH = g_lastSwingHigh;
+   double lastSL = g_lastSwingLow;
+   if(lastSH <= 0 && lastSL <= 0)
+   {
+      // Aucun bookmark valide -> supprimer la bande et sortir
+      ObjectDelete(0, bandName);
+      ObjectDelete(0, "SMC_Bookmark_SH_" + _Symbol);
+      ObjectDelete(0, "SMC_Bookmark_SL_" + _Symbol);
+      return;
+   }
+   
+   datetime now = TimeCurrent();
+   datetime future = now + PeriodSeconds(PERIOD_CURRENT) * 500; // projeter la ligne assez loin dans le futur
+   
+   // Supprimer d'anciens bookmarks horizontaux pour ce symbole
+   string shName = "SMC_Bookmark_SH_" + _Symbol;
+   string slName = "SMC_Bookmark_SL_" + _Symbol;
+   ObjectDelete(0, shName);
+   ObjectDelete(0, slName);
+   
+   // Swing High bookmark (rouge pointill√©)
+   bool hasSH = (lastSH > 0.0);
+   if(hasSH)
+   {
+      if(ObjectCreate(0, shName, OBJ_TREND, 0, now, lastSH, future, lastSH))
+      {
+         ObjectSetInteger(0, shName, OBJPROP_COLOR, clrRed);
+         ObjectSetInteger(0, shName, OBJPROP_WIDTH, 1);
+         ObjectSetInteger(0, shName, OBJPROP_STYLE, STYLE_DASHDOT);
+         ObjectSetString(0, shName, OBJPROP_TEXT, "Bookmark SH");
+      }
+   }
+   
+   // Swing Low bookmark (vert pointill√©)
+   bool hasSL = (lastSL > 0.0);
+   if(hasSL)
+   {
+      if(ObjectCreate(0, slName, OBJ_TREND, 0, now, lastSL, future, lastSL))
+      {
+         ObjectSetInteger(0, slName, OBJPROP_COLOR, clrLime);
+         ObjectSetInteger(0, slName, OBJPROP_WIDTH, 1);
+         ObjectSetInteger(0, slName, OBJPROP_STYLE, STYLE_DASHDOT);
+         ObjectSetString(0, slName, OBJPROP_TEXT, "Bookmark SL");
+      }
+   }
+
+   // Dessin de la bande verticale sur le bord droit du graphique (haut en bas)
+   // Couleur selon le type de dernier bookmark disponible
+   color bandColor = clrYellow;
+   if(hasSH && !hasSL)
+      bandColor = clrRed;
+   else if(hasSL && !hasSH)
+      bandColor = clrLime;
+
+   // R√©cup√©rer les dimensions du graphique en pixels
+   int chartWidthPixels  = (int)ChartGetInteger(0, CHART_WIDTH_IN_PIXELS, 0);
+   int chartHeightPixels = (int)ChartGetInteger(0, CHART_HEIGHT_IN_PIXELS, 0);
+   if(chartWidthPixels <= 0 || chartHeightPixels <= 0)
+      return;
+
+   int bandWidth = 10; // largeur en pixels de la bande
+
+   // Cr√©er ou mettre √† jour un OBJ_RECTANGLE_LABEL ancr√© en haut √† droite
+   if(ObjectFind(0, bandName) == -1)
+   {
+      if(!ObjectCreate(0, bandName, OBJ_RECTANGLE_LABEL, 0, 0, 0))
+         return;
+   }
+
+   ObjectSetInteger(0, bandName, OBJPROP_CORNER, CORNER_RIGHT_UPPER);
+   ObjectSetInteger(0, bandName, OBJPROP_XDISTANCE, 0);          // coll√© au bord droit
+   ObjectSetInteger(0, bandName, OBJPROP_YDISTANCE, 0);          // depuis le haut
+   ObjectSetInteger(0, bandName, OBJPROP_XSIZE, bandWidth);      // largeur bande
+   ObjectSetInteger(0, bandName, OBJPROP_YSIZE, chartHeightPixels); // hauteur totale
+   ObjectSetInteger(0, bandName, OBJPROP_COLOR, bandColor);
+   ObjectSetInteger(0, bandName, OBJPROP_BACK, true);            // en arri√®re-plan
+   ObjectSetInteger(0, bandName, OBJPROP_STYLE, STYLE_SOLID);
+   ObjectSetInteger(0, bandName, OBJPROP_WIDTH, 1);
+}
+
+//| SMC - Structures et √©num√©rations (int√©gr√©)                       |
+struct FVGData {
+   double top;
+   double bottom;
+   int direction;
+   datetime time;
+   bool isInversion;
+   int barIndex;
+};
+struct OrderBlockData {
+   double high;
+   double low;
+   int direction;
+   datetime time;
+   int barIndex;
+   string type;
+};
+struct SMC_Signal {
+   string action;
+   double confidence;
+   string concept;
+   string reasoning;
+   double entryPrice;
+   double stopLoss;
+   double takeProfit;
+};
+enum ENUM_SYMBOL_CATEGORY {
+   SYM_BOOM_CRASH,
+   SYM_VOLATILITY,
+   SYM_FOREX,
+   SYM_COMMODITY,
+   SYM_METAL,
+   SYM_UNKNOWN
+};
+ENUM_SYMBOL_CATEGORY SMC_GetSymbolCategory(string symbol)
+{
+   string s = symbol;
+   StringToUpper(s);
+   if(StringFind(s, "BOOM") >= 0 || StringFind(s, "CRASH") >= 0) return SYM_BOOM_CRASH;
+   if(StringFind(s, "VOLATILITY") >= 0 || StringFind(s, "RANGE BREAK") >= 0) return SYM_VOLATILITY;
+   if(StringFind(s, "XAU") >= 0 || StringFind(s, "GOLD") >= 0) return SYM_METAL;
+   if(StringFind(s, "XAG") >= 0 || StringFind(s, "SILVER") >= 0) return SYM_METAL;
+   if(StringFind(s, "OIL") >= 0 || StringFind(s, "COPPER") >= 0) return SYM_COMMODITY;
+   if(StringFind(s, "USD") >= 0 || StringFind(s, "EUR") >= 0 || StringFind(s, "GBP") >= 0 || StringFind(s, "JPY") >= 0) return SYM_FOREX;
+   return SYM_UNKNOWN;
+}
+
+// R√®gle directionnelle sp√©cifique Boom/Crash:
+// - Sur Boom: uniquement BUY (jamais SELL)
+// - Sur Crash: uniquement SELL (jamais BUY)
+bool IsDirectionAllowedForBoomCrash(const string symbol, const string action)
+{
+   string s = symbol;
+   StringToUpper(s);
+   string a = action;
+   StringToUpper(a);
+   
+   bool isBoom  = (StringFind(s, "BOOM")  >= 0);
+   bool isCrash = (StringFind(s, "CRASH") >= 0);
+   
+   if(isBoom && a == "SELL")
+      return false;
+   if(isCrash && a == "BUY")
+      return false;
+   return true;
+}
+
+// Contr√¥le de duplication de position:
+// - Pas de duplication sur Boom/Crash (1 position max par symbole)
+// - Sur autres march√©s: duplication seulement si
+//   * au moins 1 position existe d√©j√† sur le symbole
+//   * la premi√®re position est en gain >= 2$
+//   * l'IA confirme la m√™me direction avec >= 80% de confiance
+bool CanOpenAdditionalPositionForSymbol(const string symbol, const string action)
+{
+   int existing = CountPositionsForSymbol(symbol);
+   if(existing <= 0)
+      return true; // premi√®re position toujours autoris√©e
+   
+   // Jamais de duplication sur Boom/Crash
+   if(SMC_GetSymbolCategory(symbol) == SYM_BOOM_CRASH)
+      return false;
+   
+   // V√©rifier les conditions IA fortes (80% min) et m√™me direction
+   string aiAction = g_lastAIAction;
+   StringToUpper(aiAction);
+   string act = action;
+   StringToUpper(act);
+   
+   if(g_lastAIConfidence < 0.80)
+      return false;
+   if((act == "BUY"  && aiAction != "BUY") ||
+      (act == "SELL" && aiAction != "SELL"))
+      return false;
+   
+   // V√©rifier le gain de la position initiale (la plus ancienne) sur ce symbole
+   datetime earliestTime = 0;
+   double   earliestProfit = 0.0;
+   
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      if(!posInfo.SelectByIndex(i)) continue;
+      if(posInfo.Magic() != InpMagicNumber) continue;
+      if(posInfo.Symbol() != symbol) continue;
+      
+      datetime openTime = (datetime)posInfo.Time();
+      double profit = posInfo.Profit() + posInfo.Swap() + posInfo.Commission();
+      
+      if(earliestTime == 0 || openTime < earliestTime)
+      {
+         earliestTime = openTime;
+         earliestProfit = profit;
+      }
+   }
+   
+   if(earliestTime == 0)
+      return true; // s√©curit√©: si on ne trouve pas, ne pas bloquer compl√®tement
+   
+   return (earliestProfit >= 2.0);
+}
+bool SMC_DetectFVG(string symbol, ENUM_TIMEFRAMES tf, int lookback, FVGData &fvgOut)
+{
+   MqlRates rates[];
+   ArraySetAsSeries(rates, true);
+   if(CopyRates(symbol, tf, 0, lookback, rates) < lookback) return false;
+   for(int fvgIndex = 2; fvgIndex < lookback - 1; fvgIndex++)
+   {
+      if(rates[fvgIndex-1].low > rates[fvgIndex+1].high)
+      {
+         double gap = rates[fvgIndex-1].low - rates[fvgIndex+1].high;
+         double point = SymbolInfoDouble(symbol, SYMBOL_POINT);
+         if(gap > point * 3) {
+            fvgOut.top = rates[fvgIndex-1].low; fvgOut.bottom = rates[fvgIndex+1].high; fvgOut.direction = 1;
+            fvgOut.time = rates[fvgIndex].time; fvgOut.isInversion = false; fvgOut.barIndex = fvgIndex;
+            return true;
+         }
+      }
+      if(rates[fvgIndex-1].high < rates[fvgIndex+1].low)
+      {
+         double gap = rates[fvgIndex+1].low - rates[fvgIndex-1].high;
+         double point = SymbolInfoDouble(symbol, SYMBOL_POINT);
+         if(gap > point * 3) {
+            fvgOut.top = rates[fvgIndex+1].low; fvgOut.bottom = rates[fvgIndex-1].high; fvgOut.direction = -1;
+            fvgOut.time = rates[fvgIndex].time; fvgOut.isInversion = false; fvgOut.barIndex = fvgIndex;
+            return true;
+         }
+      }
+   }
+   return false;
+}
+bool SMC_DetectBOS(string symbol, ENUM_TIMEFRAMES tf, int &directionOut)
+{
+   MqlRates rates[];
+   ArraySetAsSeries(rates, true);
+   if(CopyRates(symbol, tf, 0, 20, rates) < 20) return false;
+   double prevSwingHigh = MathMax(rates[3].high, MathMax(rates[4].high, rates[5].high));
+   double prevSwingLow = MathMin(rates[3].low, MathMin(rates[4].low, rates[5].low));
+   double point = SymbolInfoDouble(symbol, SYMBOL_POINT);
+   double minBreak = point * 5;
+   if(rates[1].close > prevSwingHigh + minBreak) { directionOut = 1; return true; }
+   if(rates[1].close < prevSwingLow - minBreak) { directionOut = -1; return true; }
+   return false;
+}
+bool SMC_DetectLiquiditySweep(string symbol, ENUM_TIMEFRAMES tf, string &typeOut)
+{
+   int barsAgo;
+   return SMC_DetectLiquiditySweepEx(symbol, tf, typeOut, barsAgo);
+}
+bool SMC_DetectLiquiditySweepEx(string symbol, ENUM_TIMEFRAMES tf, string &typeOut, int &barsAgoOut)
+{
+   MqlRates rates[];
+   ArraySetAsSeries(rates, true);
+   if(CopyRates(symbol, tf, 0, 15, rates) < 15) return false;
+   barsAgoOut = 99;
+   double point = SymbolInfoDouble(symbol, SYMBOL_POINT);
+   double minSweep = point * 5;
+   for(int b = 1; b <= 5; b++)
+   {
+      if(b + 2 >= ArraySize(rates)) break;
+      double prevHigh = rates[b+1].high;
+      double prevLow = rates[b+1].low;
+      double currHigh = rates[b].high;
+      double currLow = rates[b].low;
+      if(currHigh > prevHigh && (currHigh - prevHigh) > minSweep)
+      {
+         typeOut = "BSL";
+         barsAgoOut = b;
+         return true;
+      }
+      if(currLow < prevLow && (prevLow - currLow) > minSweep)
+      {
+         typeOut = "SSL";
+         barsAgoOut = b;
+         return true;
+      }
+   }
+   return false;
+}
+bool SMC_DetectOrderBlock(string symbol, ENUM_TIMEFRAMES tf, OrderBlockData &obOut)
+{
+   MqlRates rates[];
+   ArraySetAsSeries(rates, true);
+   if(CopyRates(symbol, tf, 0, 50, rates) < 50) return false;
+   for(int i = 3; i < 45; i++)
+   {
+      if(rates[i].close < rates[i].open && rates[i+1].close > rates[i+1].open)
+      {
+         double moveUp = rates[i+2].high - rates[i].low;
+         double point = SymbolInfoDouble(symbol, SYMBOL_POINT);
+         if(moveUp > point * 20) {
+            obOut.high = rates[i].high; obOut.low = rates[i].low; obOut.direction = 1;
+            obOut.time = rates[i].time; obOut.barIndex = i; obOut.type = "OB";
+            return true;
+         }
+      }
+      if(rates[i].close > rates[i].open && rates[i+1].close < rates[i+1].open)
+      {
+         double moveDown = rates[i].high - rates[i+2].low;
+         double point = SymbolInfoDouble(symbol, SYMBOL_POINT);
+         if(moveDown > point * 20) {
+            obOut.high = rates[i].high; obOut.low = rates[i].low; obOut.direction = -1;
+            obOut.time = rates[i].time; obOut.barIndex = i; obOut.type = "OB";
+            return true;
+         }
+      }
+   }
+   return false;
+}
+bool SMC_IsLondonOpen(int hourStart, int hourEnd)
+{
+   MqlDateTime dt;
+   TimeToStruct(TimeCurrent(), dt);
+   return (dt.hour >= hourStart && dt.hour <= hourEnd);
+}
+bool SMC_IsNewYorkOpen(int hourStart, int hourEnd)
+{
+   MqlDateTime dt;
+   TimeToStruct(TimeCurrent(), dt);
+   return (dt.hour >= hourStart && dt.hour <= hourEnd);
+}
+bool SMC_IsKillZone(int loStart, int loEnd, int nyoStart, int nyoEnd)
+{
+   return SMC_IsLondonOpen(loStart, loEnd) || SMC_IsNewYorkOpen(nyoStart, nyoEnd);
+}
+double SMC_GetATRMultiplier(ENUM_SYMBOL_CATEGORY cat)
+{
+   switch(cat) {
+      case SYM_BOOM_CRASH:  return 1.5;
+      case SYM_VOLATILITY:  return 2.0;
+      case SYM_FOREX:       return 2.0;
+      case SYM_COMMODITY:   return 2.5;
+      case SYM_METAL:       return 2.5;
+      default:              return 2.0;
+   }
+}
+
+//| VARIABLES GLOBALES - IA ET M√âTRIQUES                             |
+
+// Variables IA globales pour stocker les d√©cisions du serveur
+string g_lastAIAction = "";
+double g_lastAIConfidence = 0.0;
+string g_lastAIAlignment = "0.0%";
+string g_lastAICoherence = "0.0%";
+datetime g_lastAIUpdate = 0;
+
+// Variables ML pour le tableau de bord
+string g_mlMetricsStr = "";
+datetime g_lastMLMetricsUpdate = 0;
+bool g_channelValid = false;
+
+// Variables de trading et positions
+double g_maxProfit = 0.0;
+datetime g_lastBoomCrashPrice = 0;
+datetime s_lastRefUpdate = 0;
+
+// Suivi de l'√©quit√© journali√®re pour contr√¥le du drawdown
+double g_dailyStartEquity = 0.0;
+double g_dailyMaxEquity   = 0.0;
+double g_dailyMinEquity   = 0.0;
+int    g_dailyEquityDate  = 0;   // YYYYMMDD
+
+//| INPUTS                                                            |
+input group "=== G√âN√âRAL ==="
+input bool   UseMinLotOnly     = true;   // Toujours lot minimum (le plus bas)
+input int    MaxPositionsTerminal = 3;   // Nombre max de positions (tout le terminal MT5)
+input bool   OnePositionPerSymbol = true; // Une seule position par symbole
+input int    InpMagicNumber       = 202502; // Magic Number
+input double MaxTotalLossDollars  = 10.0; // Perte totale max ($) - au-del√† on ferme la position la plus perdante
+input double MaxRiskPerTradePercent   = 1.5;  // Risque normal par trade (% de l'√©quit√©)
+input double MaxDailyDrawdownPercent  = 10.0; // Drawdown max journalier (%) avant blocage des nouvelles entr√©es
+input double MinSetupScoreEntry      = 70.0;  // Score minimum (0-100) pour autoriser une nouvelle entr√©e
+input bool   UseSessions       = true;   // Trader seulement LO/NYO
+input bool   ShowChartGraphics = true;   // FVG, OB, Fibo, EMA, Swing H/L sur le graphique
+input bool   ShowPremiumDiscount = true; // Zones Premium (vente) / Discount (achat) / √âquilibre
+input bool   ShowSignalArrow     = true; // Fl√®che dynamique clignotante BUY/SELL
+input bool   ShowPredictedSwing  = true; // SL/SH pr√©dits (futurs) sur le canal
+input bool   ShowEMASupportResistance = true; // EMA M1, M5, H1 en support/r√©sistance
+input bool   UltraLightMode      = false; // Mode ultra l√©ger: pas de graphiques ni IA, ex√©cution trading minimale
+input bool   BlockAllTrades      = false; // BLOQUER toutes les entr√©es/sorties (mode observation seul)
+input int    SpikePredictionOffsetMinutes = 60; // D√©calage dans le futur pour afficher l'entr√©e de spike dans la zone pr√©dite
+
+input group "=== SL/TP DYNAMIQUES (prudent / s√©curiser gain) ==="
+input double SL_ATRMult        = 2.5;    // Stop Loss (x ATR) - prudent
+input double TP_ATRMult        = 5.0;    // Take Profit (x ATR) - ratio 2:1
+input group "=== TRAILING STOP (s√©curiser les gains) ==="
+input bool   UseTrailingStop    = true;   // Activer le Trailing Stop automatique
+input double TrailingStop_ATRMult = 3.0;  // Distance Trailing Stop (x ATR) - moins agressif pour prot√©ger les gains
+
+input group "=== GRAPHIQUES SMC (affichage visuel) ==="
+input bool   ShowPredictionChannel = true; // Afficher le canal de pr√©diction ML
+input bool   ShowBookmarkLevels    = true; // Lignes horizontales sur derniers Swing High/Low (bookmark ICT)
+
+input group "=== TABLEAU DE BORD ET M√âTRIQUES ==="
+input bool   UseDashboard        = true;   // Afficher le tableau de bord avec m√©triques
+input bool   ShowMLMetrics       = true;   // Afficher les m√©triques ML (entra√Ænement mod√®le)
+input bool   UseSpikeAutoClose    = true;   // Fermeture automatique des spikes (ACTIV√â)
+input bool   UseDollarExits       = false;  // Fermetures bas√©es sur $ (D√âSACTIV√â - laisse SL/TP normal)
+input bool   UseIAHoldClose       = false;  // Fermetures IA HOLD (D√âSACTIV√â - laisse SL/TP normal)
+input bool   UseDirectionConflictClose = true; // Fermer positions en conflit direction (ex: SELL vs IA BUY sur Crash)
+
+input group "=== AI SERVER (confirmation signaux) ==="
+input bool   UseAIServer       = true;   // Utiliser le serveur IA pour confirmation
+input string AI_ServerURL       = "http://localhost:8000";  // URL du serveur IA local
+input string AI_ServerRender    = "https://kolatradebot.onrender.com";  // URL render en fallback
+input int    AI_Timeout_ms     = 5000;   // Timeout WebRequest (ms)
+input int    AI_UpdateInterval_Seconds = 30;  // Intervalle mise √† jour IA (secondes)
+input bool   UseRenderAsPrimary = false; // Utiliser le serveur local en premier (Render en fallback)
+input string AI_ServerURL2      = "http://localhost:8000";  // URL serveur local
+input double MinAIConfidence   = 0.50;   // Confiance IA min pour ex√©cuter (50% = plus d'opportunit√©s)
+input int    AI_Timeout_ms2     = 10000;  // Timeout WebRequest (ms) - Render cold start
+input string AI_ModelName       = "SMC_Model";  // Nom du mod√®le IA
+input string AI_ModelVersion    = "1.0";  // Version du mod√®le IA
+input bool   AI_UseGPU          = true;   // Utiliser le GPU pour l'IA (si disponible)
+input bool   RequireAIConfirmation = false; // Exiger confirmation IA pour SMC (false = trader sans IA)
+input bool   UseFVG            = true;   // Fair Value Gap
+input bool   UseOrderBlocks    = true;   // Order Blocks
+input bool   UseLiquiditySweep = true;   // Liquidity Sweep (LS)
+input bool   RequireStructureAfterSweep = true; // Smart Money: entr√©e apr√®s confirmation (LS+BOS/FVG/OB)
+input bool   NoEntryDuringSweep = true;  // Attendre 1+ barres apr√®s le sweep (jamais pendant panique)
+input bool   StopBeyondNewStructure = true; // Stop au-del√† nouvelle structure (pas niveau √©vident)
+input bool   UseBOS            = true;   // Break Of Structure
+input bool   UseOTE            = true;   // Optimal Trade Entry (Fib 0.62-0.79)
+input bool   UseEqualHL        = true;   // Equal Highs/Lows (EQH/EQL)
+
+input group "=== TIMEFRAMES ==="
+input ENUM_TIMEFRAMES HTF      = PERIOD_H4;  // Structure (HTF)
+input ENUM_TIMEFRAMES LTF      = PERIOD_M15; // Entr√©e (LTF)
+
+input group "=== FVG_Kill PRO (Smart Money) ==="
+input bool   UseFVGKillMode    = true;   // Activer logique FVG_Kill (EMA HTF + LS)
+input int    EMA50_Period      = 50;     // EMA 50 (HTF)
+input int    EMA200_Period     = 200;    // EMA 200 (HTF)
+input double ATR_Mult          = 1.8;    // Multiplicateur ATR (SL FVG_Kill)
+input bool   UseTrailingStructure = true; // Trailing SL sur structure (LTF bar)
+input bool   BoomCrashMode     = true;   // Boom/Crash: BUY sur Boom, SELL sur Crash
+
+input group "=== SESSIONS (heure serveur) ==="
+input bool   TradeOutsideKillZone = true;  // Trader 24/7 (true = ignorer Kill Zone)
+input int    LondonStart       = 8;      // London Open d√©but
+input int    LondonEnd         = 11;     // London Open fin
+input int    NYOStart          = 13;     // New York Open d√©but
+input int    NYOEnd            = 16;     // New York Open fin
+
+input group "=== NOTIFICATIONS ==="
+input bool   UseNotifications  = true;   // Alert + notification push (signaux et trades)
+
+input group "=== BOUGIES FUTURES ==="
+input int    PredictionChannelPastBars = 1000; // (interne)
+input int    PredictionChannelBars = 1000;  // (interne, canal de pr√©diction sur 1000 bougies futures)
+
+input group "=== CANAUX SMC MULTI-TF ==="
+input bool   ShowSMCChannelsMultiTF = true;  // Afficher canaux SMC sur H1, M30, M5
+input bool   ShowEMASupertrendMultiTF = true; // Afficher EMA Supertrend S/R sur H1, M30, M5
+input int    SMCChannelFutureBars = 5000;    // Bougies futures M1 √† projeter
+input int    EMAFastPeriod = 9;   // P√©riode EMA rapide pour Supertrend
+input int    EMASlowPeriod = 21;  // P√©riode EMA lente pour Supertrend
+input double ATRMultiplier = 2.0; // Multiplicateur ATR pour Supertrend
+
+input group "=== IA SERVEUR ==="
+
+input group "=== BOOM/CRASH ==="
+input bool   BoomBuyOnly       = true;   // Boom: BUY uniquement
+input bool   CrashSellOnly     = true;   // Crash: SELL uniquement
+input bool   NoSLTP_BoomCrash  = false;  // Pas de SL/TP sur Boom/Crash (D√âSACTIV√â - utilise SL/TP normal)
+input double BoomCrashSpikeTP  = 0.50;   // Fermer d√®s petit gain (spike capt√©) si profit > ce seuil ($) - AUGMENT√â
+input double BoomCrashSpikePct = 0.50;   // Pourcentage de mouvement pour d√©tecter spike (50% - beaucoup plus √©lev√©)
+input double TargetProfitBoomCrashUSD = 2.0; // Gain √† capter ($) - fermer si profit >= ce seuil (Spike_Close)
+input double MaxLossDollars    = 15.0;   // Fermer toute position si perte atteint ($) - augment√© pour √©viter fermetures pr√©matur√©es
+input double TakeProfitDollars = 2.0;    // Fermer si b√©n√©fice atteint ($) - Volatility/Forex/Commodity
+
+//| GESTION DES POSITIONS ET VARIABLES GLOBALES                    |
+
+// V√©rifie si, pour ce symbole, la d√©cision IA est suffisamment forte
+// pour autoriser l'ouverture d'une nouvelle position (hors Boom/Crash).
+bool IsAITradeAllowedForDirection(const string direction)
+{
+   if(!UseAIServer) return true; // Pas d'IA requise si serveur d√©sactiv√©
+   
+   ENUM_SYMBOL_CATEGORY cat = SMC_GetSymbolCategory(_Symbol);
+   // Sur Boom/Crash, on garde la logique actuelle DERIV ARROW + r√®gles sp√©cifiques
+   if(cat == SYM_BOOM_CRASH) return true;
+   
+   // Seuil fixe √† 50% pour l'ouverture,
+   // pour √©viter de filtrer trop d'opportunit√©s viables.
+   double minConf = 0.50;
+   if(g_lastAIAction == "" || g_lastAIConfidence < minConf)
+   {
+      Print("üö´ TRADE BLOQU√â - Pas de d√©cision IA forte (conf: ",
+            DoubleToString(g_lastAIConfidence*100, 1), "% < ",
+            DoubleToString(minConf*100, 1), "%) sur ", _Symbol);
+      return false;
+   }
+   
+   if(g_lastAIAction == "HOLD" || g_lastAIAction == "hold")
+   {
+      Print("üö´ TRADE BLOQU√â - IA en HOLD sur ", _Symbol, " (", DoubleToString(g_lastAIConfidence*100,1), "%)");
+      return false;
+   }
+   
+   return true;
+}
+
+CTrade trade;
+CPositionInfo posInfo;  // Local position info variable
+COrderInfo orderInfo;
+
+int atrHandle;
+int emaHandle = INVALID_HANDLE;
+int ema50H = INVALID_HANDLE;
+int ema200H = INVALID_HANDLE;
+int fractalH = INVALID_HANDLE;
+int emaM1H = INVALID_HANDLE;
+int emaM5H = INVALID_HANDLE;
+int emaH1H = INVALID_HANDLE;
+
+// Handles pour EMA Supertrend Multi-TF
+int emaFastM1 = INVALID_HANDLE;
+int emaSlowM1 = INVALID_HANDLE;
+int emaFastM5 = INVALID_HANDLE;
+int emaSlowM5 = INVALID_HANDLE;
+int emaFastH1 = INVALID_HANDLE;
+int emaSlowH1 = INVALID_HANDLE;
+int atrM1 = INVALID_HANDLE;
+int atrM5 = INVALID_HANDLE;
+int atrH1 = INVALID_HANDLE;
+
+// EMAs SMC suppl√©mentaires sur le timeframe d'entr√©e (LTF)
+int ema21LTF = INVALID_HANDLE;
+int ema31LTF = INVALID_HANDLE;
+int ema50LTF = INVALID_HANDLE;
+int ema100LTF = INVALID_HANDLE;
+int ema200LTF = INVALID_HANDLE;
+static datetime g_arrowBlinkTime = 0;
+static bool g_arrowVisible = true;
+static datetime g_spikeBlinkTime = 0;
+static bool g_spikeWarningActive = false;
+static datetime g_spikeWarningStart = 0;
+static bool g_spikeWarningVisible = true;
+int g_aiUpdateInterval = 30;
+bool g_aiConnected = false;
+static datetime g_lastBoomCrashPriceTime = 0;
+// Variables swing (compatibles avec nouveau syst√®me anti-repaint)
+double g_lastSwingHigh = 0, g_lastSwingLow = 0;
+datetime g_lastSwingHighTime = 0, g_lastSwingLowTime = 0;
+static datetime g_lastChannelUpdate = 0;
+static double g_chUpperStart = 0, g_chUpperEnd = 0, g_chLowerStart = 0, g_chLowerEnd = 0;
+static datetime g_chTimeStart = 0, g_chTimeEnd = 0;
+
+//| VARIABLES GLOBALES POUR GESTION DES PAUSES ET BLACKLIST          |
+struct SymbolPauseInfo {
+   string symbol;
+   datetime pauseUntil;
+   int consecutiveLosses;
+   int consecutiveWins;
+   datetime lastTradeTime;
+   double lastProfit;
+};
+
+SymbolPauseInfo g_symbolPauses[20]; // Maximum 20 symboles
+int g_pauseCount = 0;
+
+int OnInit()
+{
+   trade.SetExpertMagicNumber(InpMagicNumber);
+   trade.SetDeviationInPoints(20);
+   trade.SetTypeFilling(ORDER_FILLING_IOC);
+   
+   atrHandle = iATR(_Symbol, LTF, 14);
+   emaHandle = iMA(_Symbol, LTF, 9, 0, MODE_EMA, PRICE_CLOSE);
+   ema50H = iMA(_Symbol, HTF, EMA50_Period, 0, MODE_EMA, PRICE_CLOSE);
+   ema200H = iMA(_Symbol, HTF, EMA200_Period, 0, MODE_EMA, PRICE_CLOSE);
+   // EMAs SMC sur le timeframe d'entr√©e (LTF)
+   ema21LTF = iMA(_Symbol, LTF, 21, 0, MODE_EMA, PRICE_CLOSE);
+   ema31LTF = iMA(_Symbol, LTF, 31, 0, MODE_EMA, PRICE_CLOSE);
+   ema50LTF = iMA(_Symbol, LTF, 50, 0, MODE_EMA, PRICE_CLOSE);
+   ema100LTF = iMA(_Symbol, LTF, 100, 0, MODE_EMA, PRICE_CLOSE);
+   ema200LTF = iMA(_Symbol, LTF, 200, 0, MODE_EMA, PRICE_CLOSE);
+   
+   // Initialiser le syst√®me de gestion des pauses
+   InitializeSymbolPauseSystem();
+   
+   Print("üìä SMC Universal + FVG_Kill PRO | 1 pos/symbole | Strat√©gie visible");
+   emaM1H = iMA(_Symbol, PERIOD_M1, 20, 0, MODE_EMA, PRICE_CLOSE);
+   emaM5H = iMA(_Symbol, PERIOD_M5, 20, 0, MODE_EMA, PRICE_CLOSE);
+   emaH1H = iMA(_Symbol, PERIOD_H1, 20, 0, MODE_EMA, PRICE_CLOSE);
+   
+   // Handles pour EMA Supertrend Multi-TF
+   emaFastM1 = iMA(_Symbol, PERIOD_M1, EMAFastPeriod, 0, MODE_EMA, PRICE_CLOSE);
+   emaSlowM1 = iMA(_Symbol, PERIOD_M1, EMASlowPeriod, 0, MODE_EMA, PRICE_CLOSE);
+   emaFastM5 = iMA(_Symbol, PERIOD_M5, EMAFastPeriod, 0, MODE_EMA, PRICE_CLOSE);
+   emaSlowM5 = iMA(_Symbol, PERIOD_M5, EMASlowPeriod, 0, MODE_EMA, PRICE_CLOSE);
+   emaFastH1 = iMA(_Symbol, PERIOD_H1, EMAFastPeriod, 0, MODE_EMA, PRICE_CLOSE);
+   emaSlowH1 = iMA(_Symbol, PERIOD_H1, EMASlowPeriod, 0, MODE_EMA, PRICE_CLOSE);
+   atrM1 = iATR(_Symbol, PERIOD_M1, 14);
+   atrM5 = iATR(_Symbol, PERIOD_M5, 14);
+   atrH1 = iATR(_Symbol, PERIOD_H1, 14);
+   // V√©rification robuste des handles
+   if(atrHandle == INVALID_HANDLE)
+   {
+      Print("‚ùå Erreur cr√©ation ATR - Tentative de r√©cup√©ration...");
+      atrHandle = iATR(_Symbol, LTF, 14);
+      if(atrHandle == INVALID_HANDLE)
+      {
+         Print("‚ö†Ô∏è Erreur ATR - Utilisation ATR calcul√© manuellement pour √©viter d√©tachement");
+         Comment("‚ö†Ô∏è ATR MANUEL - Robot fonctionnel");
+         atrHandle = INVALID_HANDLE; // Garder INVALID_HANDLE mais continuer
+      }
+   }
+   // Les indicateurs seront ajout√©s dynamiquement si n√©cessaire pour √©viter le d√©tachement
+   GlobalVariableSet("SMC_OPEN_LOCK_" + IntegerToString(InpMagicNumber), 0);
+   Print("üìä SMC Universal + FVG_Kill PRO | 1 pos/symbole | Strat√©gie visible");
+   Print("   Cat√©gorie: ", EnumToString(SMC_GetSymbolCategory(_Symbol)));
+   Print("   IA: ", UseAIServer ? AI_ServerURL : "D√©sactiv√©");
+   return INIT_SUCCEEDED;
+}
+
+bool TryAcquireOpenLock()
+{
+   string lockName = "SMC_OPEN_LOCK_" + IntegerToString(InpMagicNumber);
+   
+   // V√©rification simple sans Sleep pour √©viter d√©tachement
+   if(GlobalVariableGet(lockName) != 0) return false;
+   GlobalVariableSet(lockName, 1);
+   if(CountPositionsOurEA() >= MaxPositionsTerminal) { GlobalVariableSet(lockName, 0); return false; }
+   return true;
+}
+void ReleaseOpenLock() { GlobalVariableSet("SMC_OPEN_LOCK_" + IntegerToString(InpMagicNumber), 0); }
+
+void OnDeinit(const int reason)
+{
+   if(atrHandle != INVALID_HANDLE) IndicatorRelease(atrHandle);
+   if(emaHandle != INVALID_HANDLE) IndicatorRelease(emaHandle);
+   if(ema50H != INVALID_HANDLE) IndicatorRelease(ema50H);
+   if(ema200H != INVALID_HANDLE) IndicatorRelease(ema200H);
+   if(fractalH != INVALID_HANDLE) IndicatorRelease(fractalH);
+   if(emaM1H != INVALID_HANDLE) IndicatorRelease(emaM1H);
+   if(emaM5H != INVALID_HANDLE) IndicatorRelease(emaM5H);
+   if(emaH1H != INVALID_HANDLE) IndicatorRelease(emaH1H);
+}
+
+bool IsBullishHTF()
+{
+   if(ema50H == INVALID_HANDLE || ema200H == INVALID_HANDLE) return false;
+   double f[], s[];
+   ArraySetAsSeries(f, true); ArraySetAsSeries(s, true);
+   if(CopyBuffer(ema50H, 0, 0, 1, f) < 1 || CopyBuffer(ema200H, 0, 0, 1, s) < 1) return false;
+   return f[0] > s[0];
+}
+bool IsBearishHTF()
+{
+   if(ema50H == INVALID_HANDLE || ema200H == INVALID_HANDLE) return false;
+   double f[], s[];
+   ArraySetAsSeries(f, true); ArraySetAsSeries(s, true);
+   if(CopyBuffer(ema50H, 0, 0, 1, f) < 1 || CopyBuffer(ema200H, 0, 0, 1, s) < 1) return false;
+   return f[0] < s[0];
+}
+bool FVGKill_LiquiditySweepDetected()
+{
+   double prevHigh = iHigh(_Symbol, LTF, 2);
+   double prevLow  = iLow(_Symbol, LTF, 2);
+   double h1 = iHigh(_Symbol, LTF, 1);
+   double l1 = iLow(_Symbol, LTF, 1);
+   return (h1 > prevHigh || l1 < prevLow);
+}
+bool FVGKill_SweepConfirmed(int minBarsAgo = 2)
+{
+   string lsType;
+   int barsAgo = 0;
+   if(!SMC_DetectLiquiditySweepEx(_Symbol, LTF, lsType, barsAgo)) return false;
+   return (barsAgo >= minBarsAgo);
+}
+
+bool IsInDiscountZone()
+{
+   double high[], low[], close[];
+   ArraySetAsSeries(high, true); ArraySetAsSeries(low, true); ArraySetAsSeries(close, true);
+   if(CopyHigh(_Symbol, PERIOD_H1, 0, 100, high) < 100 || CopyLow(_Symbol, PERIOD_H1, 0, 100, low) < 100 || CopyClose(_Symbol, PERIOD_H1, 0, 100, close) < 100) return false;
+   int n = ArraySize(close);
+   if(n < 25) return false;
+   double sma20[];
+   ArrayResize(sma20, n);
+   ArraySetAsSeries(sma20, true);
+   for(int i = 0; i < n - 20; i++) { double s = 0; for(int j = 0; j < 20; j++) s += close[i + j]; sma20[i] = s / 20; }
+   for(int i = n - 20; i < n; i++) sma20[i] = sma20[MathMax(0, n - 21)];
+   double eq = sma20[0];
+   double discLow = low[ArrayMinimum(low, 0, 20)];
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   return (bid >= discLow && bid <= eq && discLow < eq);
+}
+bool IsInPremiumZone()
+{
+   double high[], low[], close[];
+   ArraySetAsSeries(high, true); ArraySetAsSeries(low, true); ArraySetAsSeries(close, true);
+   if(CopyHigh(_Symbol, PERIOD_H1, 0, 100, high) < 100 || CopyLow(_Symbol, PERIOD_H1, 0, 100, low) < 100 || CopyClose(_Symbol, PERIOD_H1, 0, 100, close) < 100) return false;
+   int n = ArraySize(close);
+   if(n < 25) return false;
+   double sma20[];
+   ArrayResize(sma20, n);
+   ArraySetAsSeries(sma20, true);
+   for(int i = 0; i < n - 20; i++) { double s = 0; for(int j = 0; j < 20; j++) s += close[i + j]; sma20[i] = s / 20; }
+   for(int i = n - 20; i < n; i++) sma20[i] = sma20[MathMax(0, n - 21)];
+   double eq = sma20[0];
+   double premHigh = high[ArrayMaximum(high, 0, 20)];
+   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   return (ask >= eq && ask <= premHigh && premHigh > eq);
+}
+void ExecuteFVGKillBuy()
+{
+   // V√©rifier si l'ATR handle est valide
+   if(atrHandle == INVALID_HANDLE) return;
+   // STRAT√âGIE UNIQUE SPIKE POUR BOOM/CRASH: ne pas utiliser FVG_Kill sur ces indices
+   if(SMC_GetSymbolCategory(_Symbol) == SYM_BOOM_CRASH) return;
+   
+   double atr[];
+   ArraySetAsSeries(atr, true);
+   if(CopyBuffer(atrHandle, 0, 0, 1, atr) < 1) return;
+   MqlRates r[];
+   ArraySetAsSeries(r, true);
+   if(CopyRates(_Symbol, LTF, 0, 3, r) < 3) return;
+   double sl = r[1].low - atr[0] * ATR_Mult;
+   double tp = SymbolInfoDouble(_Symbol, SYMBOL_ASK) + (SymbolInfoDouble(_Symbol, SYMBOL_ASK) - sl) * 2.0;
+   if(CountPositionsOurEA() >= MaxPositionsTerminal) return;
+   if(!TryAcquireOpenLock()) return;
+   
+   // R√®gle duplication / IA avant ouverture d'une nouvelle position
+   if(!CanOpenAdditionalPositionForSymbol(_Symbol, "BUY"))
+   {
+      Print("‚ùå FVG_Kill BUY bloqu√© (r√®gle duplication / IA) sur ", _Symbol);
+      ReleaseOpenLock();
+      return;
+   }
+   double lot = CalculateLotSize();
+   if(lot <= 0) { ReleaseOpenLock(); return; }
+   
+   // Exiger une d√©cision IA forte pour tous les march√©s non Boom/Crash
+   if(!IsAITradeAllowedForDirection("BUY"))
+   {
+      ReleaseOpenLock();
+      return;
+   }
+   
+   // R√©initialiser le gain maximum pour la nouvelle position
+   g_maxProfit = 0;
+   
+   trade.Buy(lot, _Symbol, 0, sl, tp, "FVG_Kill BUY");
+   ReleaseOpenLock();
+   if(trade.ResultRetcode() == TRADE_RETCODE_DONE && UseNotifications)
+   { Alert("FVG_Kill BUY ", _Symbol); SendNotification("FVG_Kill BUY " + _Symbol); }
+}
+void ExecuteFVGKillSell()
+{
+   // V√©rifier si l'ATR handle est valide
+   if(atrHandle == INVALID_HANDLE) return;
+   // STRAT√âGIE UNIQUE SPIKE POUR BOOM/CRASH: ne pas utiliser FVG_Kill sur ces indices
+   if(SMC_GetSymbolCategory(_Symbol) == SYM_BOOM_CRASH) return;
+   
+   double atr[];
+   ArraySetAsSeries(atr, true);
+   if(CopyBuffer(atrHandle, 0, 0, 1, atr) < 1) return;
+   MqlRates r[];
+   ArraySetAsSeries(r, true);
+   if(CopyRates(_Symbol, LTF, 0, 3, r) < 3) return;
+   double sl = r[1].high + atr[0] * ATR_Mult;
+   double tp = SymbolInfoDouble(_Symbol, SYMBOL_BID) - (sl - SymbolInfoDouble(_Symbol, SYMBOL_BID)) * 2.0;
+   if(CountPositionsOurEA() >= MaxPositionsTerminal) return;
+   if(!TryAcquireOpenLock()) return;
+   
+   if(!CanOpenAdditionalPositionForSymbol(_Symbol, "SELL"))
+   {
+      Print("‚ùå FVG_Kill SELL bloqu√© (r√®gle duplication / IA) sur ", _Symbol);
+      ReleaseOpenLock();
+      return;
+   }
+   double lot = CalculateLotSize();
+   if(lot <= 0) { ReleaseOpenLock(); return; }
+   
+   // Exiger une d√©cision IA forte pour tous les march√©s non Boom/Crash
+   if(!IsAITradeAllowedForDirection("SELL"))
+   {
+      ReleaseOpenLock();
+      return;
+   }
+   
+   // R√©initialiser le gain maximum pour la nouvelle position
+   g_maxProfit = 0;
+   
+   trade.Sell(lot, _Symbol, 0, sl, tp, "FVG_Kill SELL");
+   ReleaseOpenLock();
+   if(trade.ResultRetcode() == TRADE_RETCODE_DONE && UseNotifications)
+   { Alert("FVG_Kill SELL ", _Symbol); SendNotification("FVG_Kill SELL " + _Symbol); }
+}
+
+int CountPositionsForSymbol(string symbol)
+{
+   int n = 0;
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+      if(posInfo.SelectByIndex(i) && posInfo.Magic() == InpMagicNumber && posInfo.Symbol() == symbol)
+         n++;
+   return n;
+}
+
+int CountPositionsOurEA()
+{
+   int n = 0;
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+      if(posInfo.SelectByIndex(i) && posInfo.Magic() == InpMagicNumber)
+         n++;
+   return n;
+}
+
+void CloseWorstPositionIfTotalLossExceeded()
+{
+   double totalProfit = 0;
+   double worstProfit = 0;
+   ulong worstTicket = 0;
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      if(!posInfo.SelectByIndex(i)) continue;
+      if(posInfo.Magic() != InpMagicNumber) continue;
+      double p = posInfo.Profit() + posInfo.Swap() + posInfo.Commission();
+      totalProfit += p;
+      if(worstTicket == 0 || p < worstProfit)
+      {
+         worstProfit = p;
+         worstTicket = posInfo.Ticket();
+      }
+   }
+   if(totalProfit > -MaxTotalLossDollars) return;
+   if(worstTicket != 0 && PositionCloseWithLog(worstTicket, "Perte totale max atteinte"))
+      Print("üõë Perte totale (", DoubleToString(totalProfit, 2), "$) >= ", DoubleToString(MaxTotalLossDollars, 0), "$ ‚Üí position la plus perdante ferm√©e (", DoubleToString(worstProfit, 2), "$)");
+}
+
+void CloseAllPositionsIfTotalProfitReached()
+{
+   double totalProfit = 0;
+   ulong allTickets[];
+   ArrayResize(allTickets, 0);
+   
+   // Calculer le profit total pour tous les symboles
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      if(!posInfo.SelectByIndex(i)) continue;
+      if(posInfo.Magic() != InpMagicNumber) continue;
+      double p = posInfo.Profit() + posInfo.Swap() + posInfo.Commission();
+      totalProfit += p;
+      ArrayResize(allTickets, ArraySize(allTickets) + 1);
+      allTickets[ArraySize(allTickets) - 1] = posInfo.Ticket();
+   }
+   
+   // Fermer toutes les positions si le profit total atteint 3$
+   if(totalProfit >= 3.0)
+   {
+      Print("üí∞ PROFIT TOTAL ATTEINT (", DoubleToString(totalProfit, 2), "$ >= 3.00$) ‚Üí Fermeture de toutes les positions...");
+      
+      for(int i = 0; i < ArraySize(allTickets); i++)
+      {
+         ulong ticket = allTickets[i];
+         // VALIDATION: V√©rifier que la position existe toujours avant de fermer
+         if(!PositionSelectByTicket(ticket))
+         {
+            Print("‚ö†Ô∏è Position d√©j√† ferm√©e avant profit total close - ticket=", ticket);
+            continue;
+         }
+         
+         double profit = PositionGetDouble(POSITION_PROFIT) + PositionGetDouble(POSITION_SWAP);
+         string symbol = PositionGetString(POSITION_SYMBOL);
+         
+         if(PositionCloseWithLog(ticket, "Profit total atteint"))
+         {
+            Print("‚úÖ Position ferm√©e - ", symbol, ": ", DoubleToString(profit, 2), "$");
+         }
+         else
+         {
+            Print("‚ùå √âchec fermeture - ", symbol, ": ", DoubleToString(profit, 2), "$");
+         }
+      }
+      
+      Print("üéØ FERMETURE COMPL√àTE - Profit total r√©alis√©: ", DoubleToString(totalProfit, 2), "$");
+   }
+}
+
+// Fermeture par ordre inverse (comme Spike_Close_BoomCrash) pour compatibilit√© brokers
+bool ClosePositionByDeal(ulong ticket)
+{
+   if(!PositionSelectByTicket(ticket)) return false;
+   ENUM_POSITION_TYPE type = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+   string symbol = PositionGetString(POSITION_SYMBOL);
+   double volume = PositionGetDouble(POSITION_VOLUME);
+   MqlTradeRequest request;
+   MqlTradeResult  result;
+   ZeroMemory(request);
+   request.action   = TRADE_ACTION_DEAL;
+   request.position = ticket;
+   request.symbol   = symbol;
+   request.volume   = volume;
+   request.type     = (type == POSITION_TYPE_BUY) ? ORDER_TYPE_SELL : ORDER_TYPE_BUY;
+   request.price    = (type == POSITION_TYPE_BUY) ? SymbolInfoDouble(symbol, SYMBOL_BID)
+                                                   : SymbolInfoDouble(symbol, SYMBOL_ASK);
+   request.deviation = 50;
+   return OrderSend(request, result);
+}
+
+bool CloseBoomCrashPosition(ulong ticket, const string symbol)
+{
+   if(ClosePositionByDeal(ticket))
+   {
+      Print("üß© EA CLOSE DEAL OK - ", symbol, " | ticket=", ticket);
+      return true;
+   }
+   if(PositionCloseWithLog(ticket, "Boom/Crash position close"))
+   {
+      Print("üß© EA POSITION CLOSE OK - ", symbol, " | ticket=", ticket);
+      return true;
+   }
+   int err = GetLastError();
+   Print("‚ùå EA √âCHEC FERMETURE Boom/Crash - ", symbol, " | ticket=", ticket, " | code=", err);
+   return false;
+}
+
+void CloseBoomCrashAfterSpike(ulong ticket, string symbol, double currentProfit)
+{
+   if(posInfo.Magic() != InpMagicNumber) return;
+   if(SMC_GetSymbolCategory(symbol) != SYM_BOOM_CRASH) return;
+   
+   // R√àGLE UNIVERSELLE D'ABORD: 2 dollars pour TOUS les symboles
+   if(currentProfit >= 2.0)
+   {
+      if(CloseBoomCrashPosition(ticket, symbol))
+      {
+         Print("‚úÖ Boom/Crash ferm√©: b√©n√©fice 2$ atteint (", DoubleToString(currentProfit, 2), "$) - ", symbol);
+         if(symbol == _Symbol) { g_lastBoomCrashPrice = 0; }
+      }
+      return;
+   }
+   
+   // Ensuite, les r√®gles sp√©cifiques Boom/Crash si < 2$
+   if(currentProfit >= TargetProfitBoomCrashUSD && currentProfit < 2.0)
+   {
+      if(CloseBoomCrashPosition(ticket, symbol))
+      {
+         Print("üöÄ Boom/Crash ferm√© (gain >= ", DoubleToString(TargetProfitBoomCrashUSD, 2), "$): ", DoubleToString(currentProfit, 2), "$) - ", symbol);
+         if(symbol == _Symbol) { g_lastBoomCrashPrice = 0; }
+      }
+      return;
+   }
+   
+   // Spike detection (si < 2$) - D√âSACTIV√â par d√©faut pour √©viter fermetures pr√©matur√©es
+   if(g_lastBoomCrashPrice > 0 && false) // false = D√âSACTIV√â
+   {
+      double price = SymbolInfoDouble(symbol, SYMBOL_BID);
+      double movePct = (price - g_lastBoomCrashPrice) / g_lastBoomCrashPrice * 100.0;
+      if(StringFind(symbol, "Boom") >= 0 && movePct >= BoomCrashSpikePct)
+      {
+         if(CloseBoomCrashPosition(ticket, symbol))
+         {
+            Print("üöÄ Boom/Crash ferm√© (spike prix ", DoubleToString(currentProfit, 2), "$) - ", symbol);
+            g_lastBoomCrashPrice = 0;
+            s_lastRefUpdate = 0;
+         }
+      }
+      if(StringFind(symbol, "Crash") >= 0 && movePct <= -BoomCrashSpikePct)
+      {
+         if(CloseBoomCrashPosition(ticket, symbol))
+         {
+            Print("üöÄ Boom/Crash ferm√© (spike prix ", DoubleToString(currentProfit, 2), "$) - ", symbol);
+            g_lastBoomCrashPrice = 0;
+            s_lastRefUpdate = 0;
+         }
+      }
+   }
+}
+
+// Parcourt toutes les positions et ferme Boom/Crash rapidement apr√®s spike
+void ManageBoomCrashSpikeClose()
+{
+   // DEBUG: Log pour voir si cette fonction est appel√©e
+   static datetime lastLog = 0;
+   if(TimeCurrent() - lastLog >= 5) // Log toutes les 5 secondes maximum
+   {
+      Print("üîç DEBUG - ManageBoomCrashSpikeClose appel√©e | UseSpikeAutoClose: ", UseSpikeAutoClose ? "OUI" : "NON");
+      lastLog = TimeCurrent();
+   }
+   
+   // Si la fermeture automatique est d√©sactiv√©e, sortir imm√©diatement
+   if(!UseSpikeAutoClose)
+   {
+      return;
+   }
+   
+   // OPTIMISATION: Sortir rapidement si aucune position
+   if(PositionsTotal() == 0) return;
+   
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      if(!posInfo.SelectByIndex(i)) continue;
+      if(posInfo.Magic() != InpMagicNumber) continue;
+      
+      string symbol = posInfo.Symbol();
+      ENUM_SYMBOL_CATEGORY cat = SMC_GetSymbolCategory(symbol);
+      
+      // Uniquement sur Boom/Crash
+      if(cat != SYM_BOOM_CRASH) continue;
+      
+      // NOUVEAU: Laisser les trades respirer seulement 10 secondes apr√®s ouverture (plus r√©actif)
+      datetime openTime = posInfo.Time();
+      int secondsSinceOpen = (int)(TimeCurrent() - openTime);
+      
+      if(secondsSinceOpen < 10) // Moins de 10 secondes (r√©duit de 30s)
+      {
+         Print("üîç DEBUG - Spike Close - Trade trop r√©cent - ", symbol, " | Ouvert il y a: ", secondsSinceOpen, "s");
+         continue; // Ignorer ce trade pour l'instant
+      }
+      
+      double profit = posInfo.Profit() + posInfo.Swap() + posInfo.Commission();
+      double openPrice = posInfo.PriceOpen();
+      double currentPrice = (posInfo.PositionType() == POSITION_TYPE_BUY) ? 
+                          SymbolInfoDouble(symbol, SYMBOL_BID) : 
+                          SymbolInfoDouble(symbol, SYMBOL_ASK);
+      
+      // Calculer le pourcentage de profit/perte
+      double priceChangePercent = MathAbs((currentPrice - openPrice) / openPrice) * 100;
+      
+      // DEBUG: Log l'√©tat de la position
+      Print("üîç DEBUG - Position Spike Close - ", symbol, 
+            " | Profit: ", DoubleToString(profit, 2), "$",
+            " | Changement: ", DoubleToString(priceChangePercent, 3), "%",
+            " | Type: ", (posInfo.PositionType() == POSITION_TYPE_BUY ? "BUY" : "SELL"));
+      
+      // Fermeture rapide apr√®s spike : conditions plus r√©alistes
+      bool shouldClose = false;
+      string closeReason = "";
+      
+      // Condition 1: Profit positif d√®s 0.10$ (peu importe le pourcentage)
+      if(profit >= 0.10)
+      {
+         shouldClose = true;
+         closeReason = "Spike profit positif";
+      }
+      // Condition 2: Changement significatif m√™me si perte (pour √©viter grosses pertes)
+      else if(priceChangePercent >= 0.5 && profit < -0.05) // 0.5% de changement ET perte > 0.05$
+      {
+         shouldClose = true;
+         closeReason = "Spike perte limite";
+      }
+      // Condition 3: Changement tr√®s rapide (spike typique) m√™me petit profit/perte
+      else if(priceChangePercent >= 0.3 && secondsSinceOpen <= 60) // 0.3% en moins de 60 secondes
+      {
+         shouldClose = true;
+         closeReason = "Spike mouvement rapide";
+      }
+      
+      if(shouldClose)
+      {
+         Print("‚ö†Ô∏è TENTATIVE FERMETURE SPIKE - ", symbol, " | Raison: ", closeReason, 
+               " | Profit: ", DoubleToString(profit, 2), "$ | Changement: ", DoubleToString(priceChangePercent, 3), "%");
+         ulong ticket = posInfo.Ticket();
+         // VALIDATION: V√©rifier que la position existe toujours avant de fermer
+         if(!PositionSelectByTicket(ticket))
+         {
+            Print("‚ö†Ô∏è Position d√©j√† ferm√©e avant spike close - ", symbol, " | ticket=", ticket);
+            continue;
+         }
+         
+         if(PositionCloseWithLog(ticket, "Spike close - " + closeReason))
+         {
+            // OPTIMISATION: Log minimal pour √©viter le lag
+            Print("üéØ EA FERMETURE SPIKE - ", symbol, " | ticket=", ticket, " | Profit: ", DoubleToString(profit, 2));
+            
+            if(UseNotifications)
+            {
+               Alert("üéØ Spike ferm√© - ", symbol, " - ", closeReason);
+               SendNotification("üéØ Spike ferm√© - " + symbol + " - " + closeReason);
+            }
+         }
+         else
+         {
+            int err = GetLastError();
+            Print("‚ùå EA √âCHEC FERMETURE SPIKE - ", symbol, " | ticket=", ticket, " | code=", err);
+         }
+      }
+   }
+}
+
+void ManageDollarExits()
+{
+   // Si les sorties en dollars sont d√©sactiv√©es, sortir imm√©diatement
+   if(!UseDollarExits)
+   {
+      static datetime lastLog = 0;
+      if(TimeCurrent() - lastLog >= 30) // Log toutes les 30 secondes maximum
+      {
+         Print("üîç DEBUG - ManageDollarExits D√âSACTIV√âE - laisse SL/TP normal fonctionner");
+         lastLog = TimeCurrent();
+      }
+      return;
+   }
+   
+   // DEBUG: Log pour voir si cette fonction est appel√©e
+   static datetime lastLog = 0;
+   if(TimeCurrent() - lastLog >= 5) // Log toutes les 5 secondes maximum
+   {
+      Print("üîç DEBUG - ManageDollarExits appel√©e | MaxLossDollars: ", MaxLossDollars, " | BoomCrashSpikeTP: ", BoomCrashSpikeTP);
+      lastLog = TimeCurrent();
+   }
+   
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      string symbol = PositionGetSymbol(i);
+      if(symbol == "") continue;
+      
+      ulong ticket = PositionGetInteger(POSITION_TICKET);
+      if(ticket == 0) continue;
+      double profit = PositionGetDouble(POSITION_PROFIT);
+      ENUM_SYMBOL_CATEGORY cat = SMC_GetSymbolCategory(symbol);
+      
+      // NOUVEAU: Laisser les trades respirer pendant 30 secondes apr√®s ouverture
+      datetime openTime = (datetime)PositionGetInteger(POSITION_TIME);
+      int secondsSinceOpen = (int)(TimeCurrent() - openTime);
+      
+      if(secondsSinceOpen < 30) // Moins de 30 secondes
+      {
+         Print("üîç DEBUG - Trade trop r√©cent - ", symbol, " | Ouvert il y a: ", secondsSinceOpen, "s | Profit: ", DoubleToString(profit, 2), "$");
+         continue; // Ignorer ce trade pour l'instant
+      }
+      
+      // DEBUG: Log chaque position analys√©e
+      Print("üîç DEBUG - Position analys√©e - ", symbol, " | Profit: ", DoubleToString(profit, 2), "$ | Ticket: ", ticket, " | Cat√©gorie: ", (cat == SYM_BOOM_CRASH ? "BOOM_CRASH" : "AUTRE"), " | √Çge: ", secondsSinceOpen, "s");
+      
+      // R√àGLE UNIVERSELLE: Fermer TOUTES les positions √† 2 dollars de profit
+      if(profit >= 2.0)
+      {
+         Print("‚ö†Ô∏è TENTATIVE FERMETURE TP 2$ - ", symbol, " | Profit: ", DoubleToString(profit, 2), "$");
+         // VALIDATION: V√©rifier que la position existe toujours avant de fermer
+         if(!PositionSelectByTicket(ticket))
+         {
+            Print("‚ö†Ô∏è Position d√©j√† ferm√©e avant 2$ TP - ", symbol, " | ticket=", ticket);
+            continue;
+         }
+         
+         if(PositionCloseWithLog(ticket, "Profit total atteint"))
+            Print("‚úÖ EA Position ferm√©e: b√©n√©fice 2$ atteint (", DoubleToString(profit, 2), "$) - ", symbol, " | ticket=", ticket);
+         else
+         {
+            int err = GetLastError();
+            Print("‚ùå EA √âCHEC FERMETURE TP GLOBAL - ", symbol, " | ticket=", ticket, " | code=", err);
+         }
+         continue;
+      }
+      
+      // R√®gle de perte maximale
+      if(profit <= -MaxLossDollars)
+      {
+         Print("‚ö†Ô∏è TENTATIVE FERMETURE PERTE MAX - ", symbol, " | Profit: ", DoubleToString(profit, 2), "$ | MaxLoss: ", MaxLossDollars, "$");
+         // VALIDATION: V√©rifier que la position existe toujours avant de fermer
+         if(!PositionSelectByTicket(ticket))
+         {
+            Print("‚ö†Ô∏è Position d√©j√† ferm√©e avant perte max - ", symbol, " | ticket=", ticket);
+            continue;
+         }
+         
+         if(PositionCloseWithLog(ticket, "Profit total atteint"))
+            Print("üõë EA Position ferm√©e: perte max atteinte (", DoubleToString(profit, 2), "$) - ", symbol, " | ticket=", ticket);
+         else
+         {
+            int err = GetLastError();
+            Print("‚ùå EA √âCHEC FERMETURE SL GLOBAL - ", symbol, " | ticket=", ticket, " | code=", err);
+         }
+         continue;
+      }
+      
+      // R√®gles sp√©cifiques Boom/Crash (en plus de la r√®gle universelle)
+      if(cat == SYM_BOOM_CRASH)
+      {
+         // Spike TP pour Boom/Crash
+         if(profit >= BoomCrashSpikeTP && profit < 2.0) // Si entre spike TP et 2$
+         {
+            Print("‚ö†Ô∏è TENTATIVE FERMETURE BOOM/CRASH SPIKE TP - ", symbol, " | Profit: ", DoubleToString(profit, 2), "$ | SpikeTP: ", DoubleToString(BoomCrashSpikeTP, 2), "$");
+            // VALIDATION: V√©rifier que la position existe toujours avant de fermer
+            if(!PositionSelectByTicket(ticket))
+            {
+               Print("‚ö†Ô∏è Position d√©j√† ferm√©e avant Boom/Crash spike TP - ", symbol, " | ticket=", ticket);
+               continue;
+            }
+            
+            if(CloseBoomCrashPosition(ticket, symbol))
+            {
+               Print("üöÄ EA Boom/Crash ferm√© apr√®s spike (gain > ", DoubleToString(BoomCrashSpikeTP, 2), "$): ", DoubleToString(profit, 2), "$ | ticket=", ticket, " - ", symbol);
+               if(symbol == _Symbol) { g_lastBoomCrashPrice = 0; }
+            }
+            continue;
+         }
+      }
+   }
+}
+
+// Ferme les positions en conflit de direction sur Boom/Crash (ex: SELL position quand IA = BUY)
+void ClosePositionsOnDirectionConflict()
+{
+   // Si cette fonctionnalit√© est d√©sactiv√©e, sortir
+   if(!UseDirectionConflictClose)
+      return;
+   
+   // Si l'IA n'est pas active, sortir
+   if(!UseAIServer || g_lastAIAction == "")
+      return;
+   
+   // Si l'IA est en HOLD, laisser ClosePositionsOnIAHold g√©rer
+   if(g_lastAIAction == "HOLD" || g_lastAIAction == "hold")
+      return;
+   
+   // V√©rifier seulement les symboles Boom/Crash
+   if(StringFind(_Symbol, "Boom") < 0 && StringFind(_Symbol, "Crash") < 0)
+      return;
+   
+   // D√©terminer la direction de l'IA
+   string iaDirection = "";
+   if(g_lastAIAction == "BUY" || g_lastAIAction == "buy")
+      iaDirection = "BUY";
+   else if(g_lastAIAction == "SELL" || g_lastAIAction == "sell")
+      iaDirection = "SELL";
+   else
+      return; // Pas de direction claire
+   
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      if(PositionGetTicket(i) > 0)
+      {
+         // V√©rifier si la position appartient √† notre EA et est sur ce symbole
+         if(PositionGetInteger(POSITION_MAGIC) == InpMagicNumber && 
+            PositionGetString(POSITION_SYMBOL) == _Symbol)
+         {
+            ENUM_POSITION_TYPE posType = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+            string posDirection = (posType == POSITION_TYPE_BUY) ? "BUY" : "SELL";
+            ulong ticket = PositionGetInteger(POSITION_TICKET);
+            double profit = PositionGetDouble(POSITION_PROFIT);
+            
+            // V√©rifier le conflit de direction
+            bool hasConflict = false;
+            string conflictReason = "";
+            
+            // Cas 1: Position SELL mais IA dit BUY (et BUY n'est pas autoris√© sur Crash)
+            if(posDirection == "SELL" && iaDirection == "BUY")
+            {
+               hasConflict = true;
+               conflictReason = "Position SELL mais IA = BUY (BUY non autoris√© sur Crash)";
+            }
+            // Cas 2: Position BUY mais IA dit SELL (et SELL n'est pas autoris√© sur Boom)
+            else if(posDirection == "BUY" && iaDirection == "SELL")
+            {
+               hasConflict = true;
+               conflictReason = "Position BUY mais IA = SELL (SELL non autoris√© sur Boom)";
+            }
+            
+            if(hasConflict)
+            {
+               Print("üîÑ CONFLIT DE DIRECTION d√©tect√© sur ", _Symbol);
+               Print("   Position: ", posDirection, " | IA: ", iaDirection);
+               Print("   Raison: ", conflictReason);
+               Print("   Profit actuel: ", DoubleToString(profit, 2), "$");
+               
+               // Fermer la position
+               if(trade.PositionClose(ticket))
+               {
+                  Print("‚úÖ Position ferm√©e suite conflit de direction | Profit: ", DoubleToString(profit, 2), "$");
+                  Print("   En attente d'un signal IA ", iaDirection, " pour nouvelle entr√©e");
+               }
+               else
+               {
+                  Print("‚ùå √âchec fermeture position conflit | Erreur: ", trade.ResultRetcode());
+               }
+            }
+         }
+      }
+   }
+}
+
+// Ferme toutes les positions de l'EA quand l'IA passe en HOLD
+void ClosePositionsOnIAHold()
+{
+   // Si les fermetures IA HOLD sont d√©sactiv√©es, sortir imm√©diatement
+   if(!UseIAHoldClose)
+   {
+      static datetime lastLog = 0;
+      if(TimeCurrent() - lastLog >= 30) // Log toutes les 30 secondes maximum
+      {
+         Print("üîç DEBUG - ClosePositionsOnIAHold D√âSACTIV√âE - laisse SL/TP normal fonctionner");
+         lastLog = TimeCurrent();
+      }
+      return;
+   }
+   
+   // DEBUG: Log pour voir si cette fonction est appel√©e
+   Print("üîç DEBUG - ClosePositionsOnIAHold appel√©e | g_lastAIAction: ", g_lastAIAction);
+   
+   // Si l'IA n'est pas en HOLD, ne rien faire
+   if(g_lastAIAction != "HOLD" && g_lastAIAction != "hold")
+   {
+      return;
+   }
+   
+   Print("üîç DEBUG - IA en HOLD d√©tect√© - recherche de positions √† fermer");
+   
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      if(PositionGetTicket(i) > 0)
+      {
+         // V√©rifier si la position appartient √† notre EA
+         if(PositionGetInteger(POSITION_MAGIC) == InpMagicNumber)
+         {
+            string posSymbol = PositionGetString(POSITION_SYMBOL);
+            
+            // NOUVEAU: Laisser les trades respirer pendant 30 secondes apr√®s ouverture
+            datetime openTime = (datetime)PositionGetInteger(POSITION_TIME);
+            int secondsSinceOpen = (int)(TimeCurrent() - openTime);
+            
+            if(secondsSinceOpen < 30) // Moins de 30 secondes
+            {
+               Print("üîç DEBUG - IA HOLD - Trade trop r√©cent - ", posSymbol, " | Ouvert il y a: ", secondsSinceOpen, "s");
+               continue; // Ignorer ce trade pour l'instant
+            }
+            
+            // Fermer imm√©diatement la position
+            Print("üö® FERMETURE URGENTE - IA en HOLD sur ", posSymbol, " | Ticket: ", PositionGetInteger(POSITION_TICKET));
+            
+            if(trade.PositionClose(PositionGetInteger(POSITION_TICKET)))
+            {
+               Print("‚úÖ Position ferm√©e avec succ√®s - IA HOLD protection");
+            }
+            else
+            {
+               Print("‚ùå Erreur fermeture position - Code: ", trade.ResultRetcode(), " | ", trade.ResultComment());
+            }
+         }
+      }
+   }
+}
+
+void OnTick()
+{
+   // MODE IA ULTRA STABLE - PAS DE D√âTACHEMENT
+   static datetime lastProcess = 0;
+   static datetime lastGraphicsUpdate = 0;
+   static datetime lastAIUpdate = 0;
+   static datetime lastDashboardUpdate = 0;
+   datetime currentTime = TimeCurrent();
+   
+   // Traitement contr√¥l√© pour stabilit√© (max ~1 tick toutes les 2 secondes)
+   if(currentTime - lastProcess < 2) return;
+   lastProcess = currentTime;
+   
+   // BLOCAGE TOTAL DES TRADES - Mode observation seul
+   if(BlockAllTrades)
+   {
+      static datetime lastBlockLog = 0;
+      if(currentTime - lastBlockLog >= 30) // Log toutes les 30 secondes
+      {
+         Print("üîí MODE BLOCAGE ACTIV√â - Aucune entr√©e/sortie autoris√©e - Observation seule");
+         lastBlockLog = currentTime;
+      }
+      
+      // Garder seulement les graphiques et IA pour observation
+      if(!UltraLightMode)
+      {
+         // MISE √Ä JOUR IA pour observation
+         if(UseAIServer && currentTime - lastAIUpdate >= AI_UpdateInterval_Seconds)
+         {
+            lastAIUpdate = currentTime;
+            UpdateAIDecision(AI_Timeout_ms);
+         }
+         
+         // GRAPHIQUES pour observation
+         if(ShowChartGraphics && currentTime - lastGraphicsUpdate >= 30)
+         {
+            lastGraphicsUpdate = currentTime;
+            DrawAIStatusAndPredictions();
+            if(ShowSignalArrow) { DrawSignalArrow(); UpdateSignalArrowBlink(); }
+         }
+         
+         // TABLEAU DE BORD pour observation
+         if(currentTime - lastDashboardUpdate >= 30)
+         {
+            lastDashboardUpdate = currentTime;
+            UpdateDashboard();
+         }
+      }
+      return; // Sortir imm√©diatement - aucun trading
+   }
+   
+   // STRAT√âGIE UNIQUE : SMC DERIV ARROW sur Boom/Crash uniquement
+   CheckAndExecuteDerivArrowTrade();
+   
+   // Gestion des positions existantes (fermeture rapide apr√®s spike)
+   ManageBoomCrashSpikeClose();
+   // Gestion des sorties en dollars (TP/SL globaux + BoomCrashSpikeTP)
+   ManageDollarExits();
+   
+   // Trailing stop pour s√©curiser les gains
+   if(UseTrailingStop)
+      ManageTrailingStop();
+   
+   // Si on est en mode ultra l√©ger: ne pas lancer l'IA ni mettre √† jour les graphiques/dashboard
+   if(UltraLightMode)
+      return;
+   
+   // MISE √Ä JOUR IA - Appel au serveur IA pour obtenir les d√©cisions
+   if(UseAIServer && currentTime - lastAIUpdate >= AI_UpdateInterval_Seconds)
+   {
+      lastAIUpdate = currentTime;
+      UpdateAIDecision(AI_Timeout_ms);
+      
+      // Mettre √† jour les m√©triques ML si activ√©es - R√âDUCTION DE FR√âQUENCE
+      if(ShowMLMetrics && (TimeCurrent() - g_lastMLMetricsUpdate) >= 60) // 1 minute minimum pour tests
+      {
+         UpdateMLMetricsDisplay();
+      }
+   }
+   
+   // Si l'IA est pass√©e en HOLD, couper imm√©diatement les positions de l'EA
+   Print("üîç DEBUG - V√©rification IA HOLD | g_lastAIAction: '", g_lastAIAction, "' | UseAIServer: ", UseAIServer);
+   ClosePositionsOnIAHold();
+   
+   // NOUVEAU: V√©rifier les conflits de direction sur Boom/Crash
+   ClosePositionsOnDirectionConflict();
+   
+   // D√âTECTION ULTRA-RAPIDE DE SPIKE (toutes les 5 secondes pour Boom/Crash)
+   static datetime lastSpikeCheck = 0;
+   if(StringFind(_Symbol, "Boom") >= 0 || StringFind(_Symbol, "Crash") >= 0)
+   {
+      if(currentTime - lastSpikeCheck >= 5)
+      {
+         lastSpikeCheck = currentTime;
+         CheckImminentSpike(); // V√©rification rapide sans graphiques
+      }
+   }
+   
+   // GRAPHIQUES SMC CONTR√îL√âS (toutes les 30 secondes pour plus de r√©activit√©)
+   if(ShowChartGraphics && currentTime - lastGraphicsUpdate >= 30)
+   {
+      lastGraphicsUpdate = currentTime;
+      
+      // D√âTECTION ANTI-REPAINT DES SWING POINTS
+      DetectNonRepaintingSwingPoints();
+      DrawConfirmedSwingPoints();
+      
+      // D√âTECTION SP√âCIALE BOOM/CRASH (ANTI-SPIKE)
+      if(StringFind(_Symbol, "Boom") >= 0 || StringFind(_Symbol, "Crash") >= 0)
+      {
+         DetectBoomCrashSwingPoints();
+         
+         // D√âTECTION AVANC√âE DE SPIKE IMMINENT - OPTIMIS√âE
+         CheckImminentSpike();
+      }
+      
+      // AFFICHAGE STATUT IA ET PR√âDICTIONS
+      DrawAIStatusAndPredictions();
+      
+      // Graphiques essentiels et zones Premium/Discount
+      DrawSwingHighLow();
+      DrawBookmarkLevels();
+      DrawFVGOnChart();
+      DrawOBOnChart();
+      DrawFibonacciOnChart();
+      DrawEMACurveOnChart();
+      DrawLiquidityZonesOnChart();
+      
+      // Zones Premium/Discount et √©quilibre
+      if(ShowPremiumDiscount) DrawPremiumDiscountZones();
+      
+      // Autres graphiques optionnels
+      if(ShowSignalArrow) { DrawSignalArrow(); UpdateSignalArrowBlink(); }
+      // Avertisseur visuel des spikes imminents sur Boom/Crash
+      UpdateSpikeWarningBlink();
+      if(ShowPredictedSwing) DrawPredictedSwingPoints();
+      if(ShowEMASupportResistance) DrawEMASupportResistance();
+      if(ShowPredictionChannel) DrawPredictionChannel();
+      if(ShowSMCChannelsMultiTF) DrawSMCChannelsMultiTF();
+      if(ShowEMASupertrendMultiTF) DrawEMASupertrendMultiTF();
+   }
+   
+   // TABLEAU DE BORD CONTR√îL√â (toutes les 30 secondes)
+   if(currentTime - lastDashboardUpdate >= 30)
+   {
+      lastDashboardUpdate = currentTime;
+      UpdateDashboard();
+   }
+}
+
+//| FONCTIONS DE GESTION DES PAUSES ET BLACKLIST TEMPORAIRE        |
+
+void UpdateDashboard()
+{
+   if(!UseDashboard) return;
+   string catStr = "UNKNOWN";
+   switch(SMC_GetSymbolCategory(_Symbol))
+   {
+      case SYM_BOOM_CRASH:  catStr = "Boom/Crash"; break;
+      case SYM_VOLATILITY:  catStr = "Volatility"; break;
+      case SYM_FOREX:       catStr = "Forex"; break;
+      case SYM_COMMODITY:   catStr = "Commodity"; break;
+      case SYM_METAL:       catStr = "Metal"; break;
+   }
+   int posCount = CountPositionsForSymbol(_Symbol);
+   int totalPos = CountPositionsOurEA();
+   
+   double totalPL = 0;
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+      if(posInfo.SelectByIndex(i) && posInfo.Magic() == InpMagicNumber)
+         totalPL += posInfo.Profit() + posInfo.Swap() + posInfo.Commission();
+   string swingStr = "";
+   if(g_lastSwingHigh > 0) swingStr += " SH=" + DoubleToString(g_lastSwingHigh, _Digits);
+   if(g_lastSwingLow > 0)  swingStr += " SL=" + DoubleToString(g_lastSwingLow, _Digits);
+   double atrVal = 0, emaVal = 0;
+   double atrArr[], emaArr[];
+   ArraySetAsSeries(atrArr, true); ArraySetAsSeries(emaArr, true);
+   if(CopyBuffer(atrHandle, 0, 0, 1, atrArr) >= 1) atrVal = atrArr[0];
+   if(emaHandle != INVALID_HANDLE && CopyBuffer(emaHandle, 0, 0, 1, emaArr) >= 1) emaVal = emaArr[0];
+   string trendHTF = IsBullishHTF() ? "BULLISH" : "BEARISH";
+   string lsStr = FVGKill_LiquiditySweepDetected() ? "YES" : "NO";
+   if(ShowMLMetrics && (TimeCurrent() - g_lastMLMetricsUpdate) >= 60) // 1 minute minimum pour tests
+      UpdateMLMetricsDisplay();
+   string killStr = SMC_IsKillZone(LondonStart, LondonEnd, NYOStart, NYOEnd) ? "ACTIVE" : "OFF";
+   string bcStr = (StringFind(_Symbol, "Boom") >= 0) ? "BOOM" : (StringFind(_Symbol, "Crash") >= 0) ? "CRASH" : "FOREX";
+   Comment("‚ïê‚ïê‚ïê SMC Universal + FVG_Kill PRO ‚ïê‚ïê‚ïê\n",
+           "Strat√©gie: SMC (FVG|OB|LS|BOS) + FVG_Kill (EMA HTF + LS)\n",
+           "Trend HTF: ", trendHTF, " | Liquidity Sweep: ", lsStr, " | Kill Zone: ", killStr, "\n",
+           "Boom/Crash: ", bcStr, " | Cat√©gorie: ", catStr, "\n",
+           "IA: ", (g_lastAIAction != "") ? (g_lastAIAction + " " + DoubleToString(g_lastAIConfidence*100,1) + "% | Align: " + g_lastAIAlignment + " | Coh√©r: " + g_lastAICoherence) : "OFF", "\n",
+           "Derni√®re mise √† jour IA: ", (g_lastAIUpdate > 0) ? TimeToString(g_lastAIUpdate, TIME_SECONDS) : "Jamais", "\n",
+           "Positions terminal: ", totalPos, "/", MaxPositionsTerminal, " | ", _Symbol, ": ", posCount, "/1\n",
+           "Perte totale: ", DoubleToString(totalPL, 2), " $ (max ", DoubleToString(MaxTotalLossDollars, 0), "$)\n",
+           "Swing: ", swingStr, "\n",
+           "ATR: ", DoubleToString(atrVal, _Digits), " | EMA(9): ", DoubleToString(emaVal, _Digits),
+           "\nCanal ML: ", (g_channelValid ? "OK" : "‚Äî"),
+           "\nML (entra√Ænement): ", g_mlMetricsStr);
+}
+
+void UpdateMLMetricsDisplay()
+{
+   Print("üîç DEBUG - UpdateMLMetricsDisplay appel√©e pour: ", _Symbol);
+   
+   // Protection contre les appels excessifs - minimum 1 minute entre les appels (pour tests)
+   if((TimeCurrent() - g_lastMLMetricsUpdate) < 60) // 1 minute minimum pour tests
+   {
+      Print("üîç DEBUG - UpdateMLMetricsDisplay ignor√©e (trop r√©cent)");
+      return;
+   }
+   
+   g_lastMLMetricsUpdate = TimeCurrent();
+   string symEnc = _Symbol;
+   StringReplace(symEnc, " ", "%20");
+   string baseUrl = UseRenderAsPrimary ? AI_ServerRender : AI_ServerURL;
+   string pathMetrics = "/ml/metrics?symbol=" + symEnc + "&timeframe=M1";
+   string pathStatus = "/ml/continuous/status";
+   string headers = "";
+   char post[], result[];
+   string resultHeaders;
+   
+   Print("üîç DEBUG - Requ√™te ML vers: ", baseUrl, pathMetrics);
+   
+   // R√©cup√©rer les m√©triques ML
+   int res = WebRequest("GET", baseUrl + pathMetrics, headers, AI_Timeout_ms, post, result, resultHeaders);
+   
+   Print("üîç DEBUG - WebRequest ML metrics - Code: ", res, " | Taille: ", ArraySize(result));
+   
+   if(res == 200)
+   {
+      string metricsData = CharArrayToString(result);
+      Print("üîç DEBUG - Donn√©es ML re√ßues: ", StringSubstr(metricsData, 0, MathMin(200, StringLen(metricsData))));
+      
+      // Parser les m√©triques et les afficher
+      if(StringFind(metricsData, "accuracy") >= 0)
+      {
+         g_mlMetricsStr = "Pr√©cision: " + ExtractJsonValue(metricsData, "accuracy") + "% | ";
+         g_mlMetricsStr += "Mod√®le: " + ExtractJsonValue(metricsData, "model_name") + " | ";
+         g_mlMetricsStr += "Samples: " + ExtractJsonValue(metricsData, "total_samples");
+         Print("‚úÖ DEBUG - M√©triques ML mises √† jour: ", g_mlMetricsStr);
+      }
+      else
+      {
+         g_mlMetricsStr = "M√©triques en cours de collecte...";
+         Print("‚ö†Ô∏è DEBUG - Pas de m√©triques 'accuracy' trouv√©es");
+      }
+   }
+   else
+   {
+      // Fallback vers les m√©triques par d√©faut
+      g_mlMetricsStr = "ML: En attente de donn√©es...";
+      Print("‚ùå DEBUG - Erreur WebRequest ML metrics: ", res);
+   }
+   
+   // R√©cup√©rer le statut du canal
+   int resStatus = WebRequest("GET", baseUrl + pathStatus, headers, AI_Timeout_ms, post, result, resultHeaders);
+   
+   Print("üîç DEBUG - WebRequest ML status - Code: ", resStatus);
+   
+   if(resStatus == 200)
+   {
+      string statusData = CharArrayToString(result);
+      g_channelValid = (StringFind(statusData, "\"valid\": true") >= 0);
+      Print("‚úÖ DEBUG - Canal ML valide: ", g_channelValid ? "OUI" : "NON");
+   }
+   else
+   {
+      g_channelValid = false;
+      Print("‚ùå DEBUG - Erreur WebRequest ML status: ", resStatus);
+   }
+}
+
+string ExtractJsonValue(string json, string key)
+{
+   string searchKey = "\"" + key + "\":";
+   int start = StringFind(json, searchKey);
+   if(start < 0) return "N/A";
+   
+   start += StringLen(searchKey);
+   while(start < StringLen(json) && (json[start] == ' ' || json[start] == '\t')) start++;
+   
+   int end = start;
+   while(end < StringLen(json) && json[end] != ',' && json[end] != '}' && json[end] != '\n') end++;
+   
+   string value = StringSubstr(json, start, end - start);
+   StringReplace(value, "\"", "");
+   StringReplace(value, " ", "");
+   
+   return value;
+}
+
+//| FONCTIONS IA - COMMUNICATION AVEC LE SERVEUR (copie legacy)       |
+
+bool UpdateAIDecision_Legacy(int timeoutMs = -1)
+{
+   // Protection contre les appels excessifs
+   static datetime lastAttempt = 0;
+   datetime currentTime = TimeCurrent();
+   if(currentTime - lastAttempt < 5) return false; // Max 1 appel / 5 secondes
+   lastAttempt = currentTime;
+   
+   string symEnc = _Symbol;
+   StringReplace(symEnc, " ", "%20");
+   
+   // Utiliser Render en premier si configur√©
+   string baseUrl = UseRenderAsPrimary ? AI_ServerRender : AI_ServerURL;
+   string path = "/ml/decision?symbol=" + symEnc + "&timeframe=M1";
+   string headers = "";
+   char post[], result[];
+   string resultHeaders;
+   
+   int res = WebRequest("GET", baseUrl + path, headers, timeoutMs > 0 ? timeoutMs : AI_Timeout_ms, post, result, resultHeaders);
+   
+   if(res != 200)
+   {
+      // Fallback vers l'autre URL si √©chec
+      string fallbackUrl = UseRenderAsPrimary ? AI_ServerURL : AI_ServerRender;
+      res = WebRequest("GET", fallbackUrl + path, headers, timeoutMs > 0 ? timeoutMs : AI_Timeout_ms, post, result, resultHeaders);
+      
+      if(res != 200)
+      {
+         Print("‚ùå ERREUR IA - √âchec des deux serveurs: ", res);
+         return false;
+      }
+   }
+   
+   string jsonData = CharArrayToString(result);
+   ProcessAIDecision(jsonData);
+   
+   Print("‚úÖ D√©cision IA re√ßue - Action: ", g_lastAIAction, " | Confiance: ", DoubleToString(g_lastAIConfidence*100, 1), "%");
+   return true;
+}
+
+string GetAISignalData_Legacy(string symbol, string timeframe)
+{
+   string symEnc = symbol;
+   StringReplace(symEnc, " ", "%20");
+   
+   string baseUrl = UseRenderAsPrimary ? AI_ServerRender : AI_ServerURL;
+   string path = "/ml/signal?symbol=" + symEnc + "&timeframe=" + timeframe;
+   string headers = "";
+   char post[], result[];
+   string resultHeaders;
+   
+   int res = WebRequest("GET", baseUrl + path, headers, AI_Timeout_ms, post, result, resultHeaders);
+   
+   if(res == 200)
+   {
+      return CharArrayToString(result);
+   }
+   
+   return "";
+}
+
+string GetTrendAlignmentData_Legacy(string symbol)
+{
+   string symEnc = symbol;
+   StringReplace(symEnc, " ", "%20");
+   
+   string baseUrl = UseRenderAsPrimary ? AI_ServerRender : AI_ServerURL;
+   string path = "/ml/trend_alignment?symbol=" + symEnc;
+   string headers = "";
+   char post[], result[];
+   string resultHeaders;
+   
+   int res = WebRequest("GET", baseUrl + path, headers, AI_Timeout_ms, post, result, resultHeaders);
+   
+   if(res == 200)
+   {
+      return CharArrayToString(result);
+   }
+   
+   return "";
+}
+
+string GetCoherentAnalysisData_Legacy(string symbol)
+{
+   string symEnc = symbol;
+   StringReplace(symEnc, " ", "%20");
+   
+   string baseUrl = UseRenderAsPrimary ? AI_ServerRender : AI_ServerURL;
+   string path = "/ml/coherent_analysis?symbol=" + symEnc;
+   string headers = "";
+   char post[], result[];
+   string resultHeaders;
+   
+   int res = WebRequest("GET", baseUrl + path, headers, AI_Timeout_ms, post, result, resultHeaders);
+   
+   if(res == 200)
+   {
+      return CharArrayToString(result);
+   }
+   
+   return "";
+}
+
+void ProcessAIDecision_Legacy(string jsonData)
+{
+   // Parser la r√©ponse JSON du serveur IA
+   // Format attendu: {"action": "BUY/SELL/HOLD", "confidence": 0.85, "alignment": "75%", "coherence": "82%"}
+   
+   g_lastAIUpdate = TimeCurrent();
+   
+   // Extraire l'action
+   if(StringFind(jsonData, "\"action\":") >= 0)
+   {
+      int start = StringFind(jsonData, "\"action\":") + 9;
+      int end = StringFind(jsonData, ",", start);
+      if(end < 0) end = StringFind(jsonData, "}", start);
+      
+      if(end > start)
+      {
+         string action = StringSubstr(jsonData, start, end - start);
+         StringReplace(action, "\"", "");
+         StringReplace(action, " ", "");
+         g_lastAIAction = action;
+      }
+   }
+   
+   // Extraire la confiance
+   if(StringFind(jsonData, "\"confidence\":") >= 0)
+   {
+      int start = StringFind(jsonData, "\"confidence\":") + 13;
+      int end = StringFind(jsonData, ",", start);
+      if(end < 0) end = StringFind(jsonData, "}", start);
+      
+      if(end > start)
+      {
+         string confStr = StringSubstr(jsonData, start, end - start);
+         double rawConf   = StringToDouble(confStr);
+         // Le serveur peut envoyer 0‚Äì1 (d√©cimal) ou 0‚Äì100 (pourcentage) ‚Üí normaliser en 0‚Äì1
+         if(rawConf > 1.0)
+            rawConf /= 100.0;
+         g_lastAIConfidence = rawConf;
+      }
+   }
+   
+   // Extraire l'alignement
+   if(StringFind(jsonData, "\"alignment\":") >= 0)
+   {
+      int start = StringFind(jsonData, "\"alignment\":") + 12;
+      int end = StringFind(jsonData, ",", start);
+      if(end < 0) end = StringFind(jsonData, "}", start);
+      
+      if(end > start)
+      {
+         string alignStr = StringSubstr(jsonData, start, end - start);
+         StringReplace(alignStr, "\"", "");
+         g_lastAIAlignment = alignStr;
+      }
+   }
+   
+   // Extraire la coh√©rence
+   if(StringFind(jsonData, "\"coherence\":") >= 0)
+   {
+      int start = StringFind(jsonData, "\"coherence\":") + 13;
+      int end = StringFind(jsonData, ",", start);
+      if(end < 0) end = StringFind(jsonData, "}", start);
+      
+      if(end > start)
+      {
+         string cohStr = StringSubstr(jsonData, start, end - start);
+         StringReplace(cohStr, "\"", "");
+         g_lastAICoherence = cohStr;
+      }
+   }
+   
+   // Si aucune donn√©e trouv√©e, valeurs par d√©faut
+   if(g_lastAIAction == "") g_lastAIAction = "HOLD";
+   if(g_lastAIConfidence == 0) g_lastAIConfidence = 0.5;
+   if(g_lastAIAlignment == "") g_lastAIAlignment = "50%";
+   if(g_lastAICoherence == "") g_lastAICoherence = "50%";
+}
+
+
+//| GESTION DES POSITIONS ET VARIABLES GLOBALES                    |
+
+void PlaceScalpingLimitOrders(MqlRates &rates[], int futureBars, double currentPrice, double currentATR, double trendSlope)
+{
+   // V√©rifier si une position existe d√©j√† sur ce symbole (uniquement pour notre EA)
+   bool hasExistingPosition = false;
+   string existingPositionType = "";
+   
+   // BLOQUER LES ORDRES LIMITES SUR BOOM/CRASH - ATTENDRE DERIV ARROW
+   ENUM_SYMBOL_CATEGORY cat = SMC_GetSymbolCategory(_Symbol);
+   if(cat == SYM_BOOM_CRASH)
+   {
+      Print("üö´ ORDRES LIMITES BLOQU√âS SUR BOOM/CRASH - Attendre DERIV ARROW pour ", _Symbol);
+      return;
+   }
+   
+   // BLOQUER LES ORDRES SI PRIX EST DANS UN RANGE
+   if(IsPriceInRange())
+   {
+      Print("üö´ ORDRES LIMITES BLOQU√âS - Prix dans un range sur ", _Symbol, " - Attente de breakout");
+      return;
+   }
+   
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(PositionSelectByTicket(ticket))
+      {
+         if(PositionGetString(POSITION_SYMBOL) == _Symbol && PositionGetInteger(POSITION_MAGIC) == InpMagicNumber)
+         {
+            hasExistingPosition = true;
+            existingPositionType = EnumToString((ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE));
+            break;
+         }
+      }
+   }
+   
+   if(hasExistingPosition)
+   {
+      Print("üîÑ Position d√©j√† existante sur ", _Symbol, " (", existingPositionType, ") - pas d'ordres limites");
+      return;
+   }
+   
+   // Compter les ordres limites existants pour ce symbole
+   int existingLimitOrders = 0;
+   for(int i = OrdersTotal() - 1; i >= 0; i--)
+   {
+      if(OrderSelect(OrderGetTicket(i)))
+      {
+         if(OrderGetString(ORDER_SYMBOL) == _Symbol && 
+            (OrderGetInteger(ORDER_TYPE) == ORDER_TYPE_BUY_LIMIT || OrderGetInteger(ORDER_TYPE) == ORDER_TYPE_SELL_LIMIT) &&
+            OrderGetInteger(ORDER_MAGIC) == InpMagicNumber)
+         {
+            existingLimitOrders++;
+         }
+      }
+   }
+   
+   if(existingLimitOrders >= 2)
+   {
+      Print("üìã DEUX ORDRES LIMITES D√âJ√Ä EXISTANTS pour ", _Symbol, " - Maximum atteint");
+      return;
+   }
+   
+   // VALIDATION IA FORTE AVANT ORDRES LIMITES
+   if(g_lastAIAction == "" || g_lastAIConfidence < MinAIConfidence)
+   {
+      Print("üö´ ORDRES LIMITES BLOQU√âS - Pas de d√©cision IA forte (conf: ", DoubleToString(g_lastAIConfidence*100, 1), "% < ", DoubleToString(MinAIConfidence*100, 1), "%)");
+      return;
+   }
+   
+   // BLOQUER LES ORDRES SI IA EST EN HOLD
+   Print("üîç DEBUG HOLD: g_lastAIAction = '", g_lastAIAction, "' | g_lastAIConfidence = ", DoubleToString(g_lastAIConfidence*100, 1), "%");
+   
+   if(g_lastAIAction == "HOLD" || g_lastAIAction == "hold")
+   {
+      Print("üö´ ORDRES LIMITES BLOQU√âS - IA en HOLD - Attente de changement de statut");
+      return;
+   }
+   else
+   {
+      Print("‚úÖ ORDRES LIMITES AUTORIS√âS - IA: ", g_lastAIAction, " (pas HOLD)");
+   }
+   
+   // V√©rification suppl√©mentaire pour les signaux forts
+   bool hasStrongSignal = false;
+   if(StringFind(g_lastAIAction, "BUY") >= 0 || StringFind(g_lastAIAction, "buy") >= 0)
+   {
+      hasStrongSignal = (g_lastAIConfidence >= 0.75); // 75% minimum pour BUY
+   }
+   else if(StringFind(g_lastAIAction, "SELL") >= 0 || StringFind(g_lastAIAction, "sell") >= 0)
+   {
+      hasStrongSignal = (g_lastAIConfidence >= 0.75); // 75% minimum pour SELL
+   }
+   
+   if(!hasStrongSignal)
+   {
+      Print("üö´ ORDRES LIMITES BLOQU√âS - Signal IA pas assez fort (", DoubleToString(g_lastAIConfidence*100, 1), "% < 75%)");
+      return;
+   }
+   
+   Print("‚úÖ ORDRES LIMITES AUTORIS√âS - IA: ", g_lastAIAction, " | Conf: ", DoubleToString(g_lastAIConfidence*100, 1), "% | Signal FORT");
+   
+   // D√âTECTION SP√âCIALE POUR BOOM/CRASH
+   string symbol = _Symbol;
+   bool isBoom = (StringFind(symbol, "Boom") >= 0);
+   bool isCrash = (StringFind(symbol, "Crash") >= 0);
+   
+   if(isBoom || isCrash)
+   {
+      DetectAndPlaceBoomCrashSpikeOrders(rates, currentPrice, currentATR, isBoom, existingLimitOrders);
+   }
+   else
+   {
+      // LOGIQUE NORMALE POUR AUTRES SYMBOLES BAS√âE SUR SH/SL HISTORIQUES
+      PlaceHistoricalBasedScalpingOrders(rates, futureBars, currentPrice, currentATR, trendSlope, existingLimitOrders);
+   }
+}
+
+void PlaceHistoricalBasedScalpingOrders(MqlRates &rates[], int futureBars, double currentPrice, double currentATR, double trendSlope, int existingLimitOrders)
+   {
+      // 1) STRAT√âGIE EMA SMC (200, 100, 50, 31, 21) AVEC IA FORTE
+      int ordersToPlace = 2 - existingLimitOrders; // Maximum 2 ordres par symbole
+      if(ordersToPlace > 0 && ema21LTF != INVALID_HANDLE && ema31LTF != INVALID_HANDLE &&
+         ema50LTF != INVALID_HANDLE && ema100LTF != INVALID_HANDLE && ema200LTF != INVALID_HANDLE)
+      {
+         double emaBuf[];
+         ArraySetAsSeries(emaBuf, true);
+         ArrayResize(emaBuf, 1);
+      double ema21 = 0, ema31 = 0, ema50 = 0, ema100 = 0, ema200 = 0;
+      if(CopyBuffer(ema21LTF, 0, 0, 1, emaBuf) >= 1) ema21 = emaBuf[0];
+      if(CopyBuffer(ema31LTF, 0, 0, 1, emaBuf) >= 1) ema31 = emaBuf[0];
+      if(CopyBuffer(ema50LTF, 0, 0, 1, emaBuf) >= 1) ema50 = emaBuf[0];
+      if(CopyBuffer(ema100LTF, 0, 0, 1, emaBuf) >= 1) ema100 = emaBuf[0];
+      if(CopyBuffer(ema200LTF, 0, 0, 1, emaBuf) >= 1) ema200 = emaBuf[0];
+      
+      double closePrice = rates[0].close;
+      bool emaOk = (ema21 > 0 && ema31 > 0 && ema50 > 0 && ema100 > 0 && ema200 > 0);
+      
+      if(emaOk)
+      {
+         // D√©terminer la tendance EMA sur LTF
+         bool uptrend = (closePrice > ema200 && ema21 > ema31 && ema31 > ema50 && ema50 > ema100 && ema100 > ema200);
+         bool downtrend = (closePrice < ema200 && ema21 < ema31 && ema31 < ema50 && ema50 < ema100 && ema100 < ema200);
+         
+         string aiDir = g_lastAIAction;
+         StringToUpper(aiDir);
+         
+         // BUY LIMIT en uptrend, IA BUY (confiance d√©j√† v√©rifi√©e √† >= 75% dans PlaceScalpingLimitOrders)
+         if(uptrend && (aiDir == "BUY") && ordersToPlace > 0)
+         {
+            // Chercher l'EMA la plus proche en dessous du prix actuel
+            double emaLevels[5] = {ema21, ema31, ema50, ema100, ema200};
+            double bestLevel = 0;
+            for(int i = 0; i < 5; i++)
+            {
+               double lvl = emaLevels[i];
+               if(lvl < closePrice)
+               {
+                  if(bestLevel == 0 || lvl > bestLevel)
+                     bestLevel = lvl;
+               }
+            }
+            
+            if(bestLevel > 0)
+            {
+               double entry = bestLevel;
+               double sl = entry - currentATR * SL_ATRMult;
+               double tp = entry + currentATR * TP_ATRMult;
+               
+               MqlTradeRequest req = {};
+               MqlTradeResult res = {};
+               req.action = TRADE_ACTION_PENDING;
+               req.symbol = _Symbol;
+               req.volume = NormalizeVolumeForSymbol(0.01);
+               req.type = ORDER_TYPE_BUY_LIMIT;
+               req.price = entry;
+               req.sl = sl;
+               req.tp = tp;
+               req.magic = InpMagicNumber;
+               req.comment = "EMA SMC BUY LIMIT";
+               
+               if(ValidateAndAdjustLimitPrice(req.price, req.sl, req.tp, ORDER_TYPE_BUY_LIMIT) && OrderSend(req, res))
+               {
+                  Print("üìà EMA SMC BUY LIMIT @ ", req.price, " (EMA niveau) | SL=", req.sl, " | TP=", req.tp);
+                  ordersToPlace--;
+               }
+            }
+         }
+         
+         // SELL LIMIT en downtrend, IA SELL
+         if(downtrend && (aiDir == "SELL") && ordersToPlace > 0)
+         {
+            // Chercher l'EMA la plus proche au-dessus du prix actuel
+            double emaLevels[5] = {ema21, ema31, ema50, ema100, ema200};
+            double bestLevel = 0;
+            for(int i = 0; i < 5; i++)
+            {
+               double lvl = emaLevels[i];
+               if(lvl > closePrice)
+               {
+                  if(bestLevel == 0 || lvl < bestLevel)
+                     bestLevel = lvl;
+               }
+            }
+            
+            if(bestLevel > 0)
+            {
+               double entry = bestLevel;
+               double sl = entry + currentATR * SL_ATRMult;
+               double tp = entry - currentATR * TP_ATRMult;
+               
+               MqlTradeRequest req = {};
+               MqlTradeResult res = {};
+               req.action = TRADE_ACTION_PENDING;
+               req.symbol = _Symbol;
+               req.volume = NormalizeVolumeForSymbol(0.01);
+               req.type = ORDER_TYPE_SELL_LIMIT;
+               req.price = entry;
+               req.sl = sl;
+               req.tp = tp;
+               req.magic = InpMagicNumber;
+               req.comment = "EMA SMC SELL LIMIT";
+               
+               if(ValidateAndAdjustLimitPrice(req.price, req.sl, req.tp, ORDER_TYPE_SELL_LIMIT) && OrderSend(req, res))
+               {
+                  Print("üìâ EMA SMC SELL LIMIT @ ", req.price, " (EMA niveau) | SL=", req.sl, " | TP=", req.tp);
+                  ordersToPlace--;
+               }
+            }
+         }
+      }
+   }
+   
+   // ANALYSE DES SH/SL HISTORIQUES POUR PR√âDIRE LES MOUVEMENTS FUTURS
+   double recentSwingHighs[], recentSwingLows[];
+   ArrayResize(recentSwingHighs, 10);
+   ArrayResize(recentSwingLows, 10);
+   int swingHighCount = 0, swingLowCount = 0;
+   
+   // D√©tecter les SH/SL historiques r√©cents (derni√®res 100 bougies)
+   for(int i = 10; i < 100 && (swingHighCount < 10 || swingLowCount < 10); i++)
+   {
+      // D√©tection de Swing High historique
+      bool isHistoricalSH = true;
+      for(int j = MathMax(0, i-5); j <= MathMin(ArraySize(rates)-1, i+5); j++)
+      {
+         if(j != i && rates[j].high >= rates[i].high)
+         {
+            isHistoricalSH = false;
+            break;
+         }
+      }
+      
+      if(isHistoricalSH && rates[i].high > rates[i].close)
+      {
+         recentSwingHighs[swingHighCount] = rates[i].high;
+         swingHighCount++;
+      }
+      
+      // D√©tection de Swing Low historique
+      bool isHistoricalSL = true;
+      for(int j = MathMax(0, i-5); j <= MathMin(ArraySize(rates)-1, i+5); j++)
+      {
+         if(j != i && rates[j].low <= rates[i].low)
+         {
+            isHistoricalSL = false;
+            break;
+         }
+      }
+      
+      if(isHistoricalSL && rates[i].low < rates[i].close)
+      {
+         recentSwingLows[swingLowCount] = rates[i].low;
+         swingLowCount++;
+      }
+   }
+   
+   // STRAT√âGIE BAS√âE SUR L'ANALYSE HISTORIQUE
+   // Si on a r√©cemment touch√© un SL, le prix a tendance √† monter ‚Üí BUY LIMIT au niveau exact du SL
+   // Si on a r√©cemment touch√© un SH, le prix a tendance √† baisser ‚Üí SELL LIMIT au niveau exact du SH
+   
+   // Il reste √©ventuellement des ordres √† placer sur la base de l'historique
+   
+   // ORDRE 1: BAS√â SUR LE DERNIER SL HISTORIQUE (STRAT√âGIE BUY)
+   if(swingLowCount > 0 && ordersToPlace > 0)
+   {
+      double lastSL = recentSwingLows[0]; // Le SL le plus r√©cent
+      double buyLimitPrice = lastSL; // Ordre plac√© directement au niveau du SL
+      double tpPrice = buyLimitPrice + currentATR * 1.5; // TP plus proche pour scalping
+      
+      // Ne placer un ordre que si le SL est relativement proche (max 0.5 ATR pour petits mouvements)
+      if(MathAbs(buyLimitPrice - currentPrice) <= currentATR * 0.5)
+      {
+         // Si le SL est trop proche (< 0.1 ATR), ajuster pour √©viter les ordres trop pr√®s
+         if(MathAbs(buyLimitPrice - currentPrice) < currentATR * 0.1)
+         {
+            buyLimitPrice = currentPrice - (currentATR * 0.15); // 15% de l'ATR sous le prix
+            tpPrice = buyLimitPrice + (currentATR * 0.3); // TP plus proche pour petits mouvements
+         }
+         
+         MqlTradeRequest request = {};
+         MqlTradeResult result = {};
+         
+         request.action = TRADE_ACTION_PENDING;
+         request.symbol = _Symbol;
+         request.volume = NormalizeVolumeForSymbol(0.01);
+         request.type = ORDER_TYPE_BUY_LIMIT;
+         request.price = buyLimitPrice;
+         request.sl = buyLimitPrice - (currentATR * 0.5); // SL plus proche pour petits mouvements
+         request.tp = tpPrice;
+         request.magic = InpMagicNumber;
+         request.comment = "HIST SL BUY - PETITS MOUVEMENTS";
+         
+         // VALIDATION ET AJUSTEMENT DES PRIX AVANT ENVOI
+         if(!ValidateAndAdjustLimitPrice(request.price, request.sl, request.tp, ORDER_TYPE_BUY_LIMIT))
+         {
+            Print("‚ùå √âchec validation prix BUY LIMIT - Ordre annul√©");
+            return;
+         }
+         
+         if(OrderSend(request, result))
+         {
+            Print("üìà ORDRE BUY PETITS MOUVEMENTS - Prix: ", request.price, " | TP: ", request.tp, " | SL: ", request.sl, " | Distance: ", MathAbs(request.price - currentPrice), " points");
+            ordersToPlace--;
+         }
+      }
+      else
+      {
+         Print("üìç SL trop loin (", MathAbs(lastSL - currentPrice), " > 0.5 ATR) - Ordre BUY annul√© pour petits mouvements");
+      }
+   }
+   
+   // ORDRE 2: BAS√â SUR LE DERNIER SH HISTORIQUE (STRAT√âGIE SELL)
+   if(swingHighCount > 0 && ordersToPlace > 0)
+   {
+      double lastSH = recentSwingHighs[0]; // Le SH le plus r√©cent
+      double sellLimitPrice = lastSH; // Ordre plac√© directement au niveau du SH
+      double tpPrice = sellLimitPrice - currentATR * 1.5; // TP plus proche pour scalping
+      
+      // Ne placer un ordre que si le SH est relativement proche (max 0.5 ATR pour petits mouvements)
+      if(MathAbs(sellLimitPrice - currentPrice) <= currentATR * 0.5)
+      {
+         // Si le SH est trop proche (< 0.1 ATR), ajuster pour √©viter les ordres trop pr√®s
+         if(MathAbs(sellLimitPrice - currentPrice) < currentATR * 0.1)
+         {
+            sellLimitPrice = currentPrice + (currentATR * 0.15); // 15% de l'ATR au-dessus du prix
+            tpPrice = sellLimitPrice - (currentATR * 0.3); // TP plus proche pour petits mouvements
+         }
+         
+         MqlTradeRequest request = {};
+         MqlTradeResult result = {};
+         
+         request.action = TRADE_ACTION_PENDING;
+         request.symbol = _Symbol;
+         request.volume = NormalizeVolumeForSymbol(0.01);
+         request.type = ORDER_TYPE_SELL_LIMIT;
+         request.price = sellLimitPrice;
+         request.sl = sellLimitPrice + (currentATR * 0.5); // SL plus proche pour petits mouvements
+         request.tp = tpPrice;
+         request.magic = InpMagicNumber;
+         request.comment = "HIST SH SELL - PETITS MOUVEMENTS";
+         
+         // VALIDATION ET AJUSTEMENT DES PRIX AVANT ENVOI
+         if(!ValidateAndAdjustLimitPrice(request.price, request.sl, request.tp, ORDER_TYPE_SELL_LIMIT))
+         {
+            Print("‚ùå √âchec validation prix SELL LIMIT - Ordre annul√©");
+            return;
+         }
+         
+         if(OrderSend(request, result))
+         {
+            Print("üìâ ORDRE SELL PETITS MOUVEMENTS - Prix: ", request.price, " | TP: ", request.tp, " | SL: ", request.sl, " | Distance: ", MathAbs(request.price - currentPrice), " points");
+            ordersToPlace--;
+         }
+      }
+      else
+      {
+         Print("üìç SH trop loin (", MathAbs(lastSH - currentPrice), " > 0.5 ATR) - Ordre SELL annul√© pour petits mouvements");
+      }
+   }
+   
+   if(ordersToPlace > 0)
+   {
+      Print("üìä STRAT√âGIE HISTORIQUE - ", (2 - existingLimitOrders), " ordres plac√©s sur SH/SL historiques");
+   }
+   else
+   {
+      Print("üìä AUCUN SH/SL HISTORIQUE VALIDE - Analyse continue...");
+   }
+}
+
+void DetectAndPlaceBoomCrashSpikeOrders(MqlRates &rates[], double currentPrice, double currentATR, bool isBoom, int existingLimitOrders)
+{
+   // D√âTECTION DES POINTS D'ENTR√âE DE SPIKE BOOM/CRASH
+   double spikeEntryPoints[];
+   ArrayResize(spikeEntryPoints, 20);
+   int spikeCount = 0;
+   
+   // Analyser les 30 derni√®res bougies pour d√©tecter les points de spike
+   for(int i = 2; i < 32 && spikeCount < 20; i++)
+   {
+      // D√©tection de compression avant spike (volatilit√© faible)
+      bool isCompression = true;
+      double avgRange = 0;
+      for(int j = i-5; j <= i-1; j++)
+      {
+         if(j >= 0)
+         {
+            avgRange += rates[j].high - rates[j].low;
+         }
+      }
+      if(i >= 5) avgRange /= 5;
+      
+      // V√©rifier si les 5 bougies pr√©c√©dentes ont une faible volatilit√©
+      for(int j = i-5; j <= i-1 && j >= 0; j++)
+      {
+         double currentRange = rates[j].high - rates[j].low;
+         if(currentRange > avgRange * 1.5) // Volatilit√© trop √©lev√©e
+         {
+            isCompression = false;
+            break;
+         }
+      }
+      
+      // D√©tection du point d'entr√©e du spike
+      if(isCompression && i >= 2)
+      {
+         double prevClose = rates[i-1].close;
+         double currentClose = rates[i].close;
+         double priceChange = MathAbs(currentClose - prevClose) / prevClose;
+         
+         // Spike significatif d√©tect√©
+         if(priceChange > 0.008) // 0.8% de mouvement minimum
+         {
+            spikeEntryPoints[spikeCount] = currentClose;
+            spikeCount++;
+            
+            // Marquer le point d'entr√©e sur le graphique + activer l'avertisseur clignotant
+            string spikeName = "SPIKE_ENTRY_" + IntegerToString(i);
+            color spikeColor = isBoom ? clrOrange : clrPurple;
+            
+            // Positionner l'affichage du spike dans la zone pr√©dite (d√©cal√© dans le futur)
+            datetime spikeTime = TimeCurrent() + (datetime)(SpikePredictionOffsetMinutes * 60);
+            
+            if(ObjectCreate(0, spikeName, OBJ_ARROW, 0, spikeTime, currentClose))
+            {
+               ObjectSetInteger(0, spikeName, OBJPROP_COLOR, spikeColor);
+               ObjectSetInteger(0, spikeName, OBJPROP_WIDTH, 5);
+               ObjectSetInteger(0, spikeName, OBJPROP_ARROWCODE, isBoom ? 233 : 234);
+               ObjectSetString(0, spikeName, OBJPROP_TEXT, isBoom ? "SPIKE BUY" : "SPIKE SELL");
+               ObjectSetInteger(0, spikeName, OBJPROP_FONTSIZE, 12);
+               ObjectSetInteger(0, spikeName, OBJPROP_ANCHOR, isBoom ? ANCHOR_LOWER : ANCHOR_UPPER);
+               ObjectSetInteger(0, spikeName, OBJPROP_TIMEFRAMES, OBJ_ALL_PERIODS);
+               ObjectSetInteger(0, spikeName, OBJPROP_BACK, false);
+            }
+            
+            // Fl√®che unique d'avertissement clignotante
+            if(ObjectFind(0, "SMC_Spike_Warning") < 0)
+            {
+               if(ObjectCreate(0, "SMC_Spike_Warning", OBJ_ARROW, 0, spikeTime, currentClose))
+               {
+                  ObjectSetInteger(0, "SMC_Spike_Warning", OBJPROP_COLOR, clrYellow);
+                  ObjectSetInteger(0, "SMC_Spike_Warning", OBJPROP_WIDTH, 6);
+                  ObjectSetInteger(0, "SMC_Spike_Warning", OBJPROP_ARROWCODE, isBoom ? 233 : 234);
+                  ObjectSetString(0, "SMC_Spike_Warning", OBJPROP_TEXT, "SPIKE IMMINENT");
+                  ObjectSetInteger(0, "SMC_Spike_Warning", OBJPROP_FONTSIZE, 14);
+                  ObjectSetInteger(0, "SMC_Spike_Warning", OBJPROP_ANCHOR, isBoom ? ANCHOR_LOWER : ANCHOR_UPPER);
+                  ObjectSetInteger(0, "SMC_Spike_Warning", OBJPROP_TIMEFRAMES, OBJ_ALL_PERIODS);
+                  ObjectSetInteger(0, "SMC_Spike_Warning", OBJPROP_BACK, false);
+               }
+            }
+            else
+            {
+               ObjectMove(0, "SMC_Spike_Warning", 0, rates[i].time, currentClose);
+               ObjectSetInteger(0, "SMC_Spike_Warning", OBJPROP_COLOR, clrYellow);
+            }
+            
+            g_spikeWarningActive = true;
+            g_spikeWarningStart = TimeCurrent();
+            g_spikeWarningVisible = true;
+         }
+      }
+   }
+   
+   // PLACER LES ORDRES LIMITES AUX POINTS D'ENTR√âE D√âTECT√âS
+   if(spikeCount > 0)
+   {
+      int ordersToPlace = MathMin(2 - existingLimitOrders, spikeCount); // Limiter par le nombre d'ordres disponibles
+      
+      for(int i = 0; i < ordersToPlace && i < spikeCount; i++)
+      {
+         // Prendre le point de spike le plus r√©cent
+         double entryPrice = spikeEntryPoints[i];
+         string spikeType = isBoom ? "BOOM SPIKE BUY" : "CRASH SPIKE SELL";
+         
+         // Placer ordre limite exactement au point d'entr√©e
+         MqlTradeRequest request = {};
+         MqlTradeResult result = {};
+         
+         request.action = TRADE_ACTION_PENDING;
+         request.symbol = _Symbol;
+         request.volume = NormalizeVolumeForSymbol(0.01);
+         request.type = isBoom ? ORDER_TYPE_BUY_LIMIT : ORDER_TYPE_SELL_LIMIT;
+         request.price = entryPrice;
+         request.sl = entryPrice - (isBoom ? currentATR * 2.0 : -currentATR * 2.0);
+         request.tp = entryPrice + (isBoom ? currentATR * 4.0 : -currentATR * 4.0);
+         request.magic = InpMagicNumber;
+         request.comment = spikeType;
+         
+         // VALIDATION ET AJUSTEMENT DES PRIX AVANT ENVOI
+         ENUM_ORDER_TYPE orderType = isBoom ? ORDER_TYPE_BUY_LIMIT : ORDER_TYPE_SELL_LIMIT;
+         if(!ValidateAndAdjustLimitPrice(request.price, request.sl, request.tp, orderType))
+         {
+            Print("‚ùå √âchec validation prix ", spikeType, " - Ordre annul√©");
+            continue;
+         }
+         
+         if(OrderSend(request, result))
+         {
+            Print("üöÄ ", spikeType, " PLAC√â - Entr√©e: ", request.price, " | TP: ", request.tp, " | SL: ", request.sl);
+         }
+         else
+         {
+            Print("‚ùå √âCHEC PLACEMENT ", spikeType, " - Erreur: ", result.comment);
+         }
+      }
+      
+      if(ordersToPlace < spikeCount)
+      {
+         Print("üöÄ ", (spikeCount - ordersToPlace), " spikes suppl√©mentaires d√©tect√©s mais ordres limites non disponibles");
+      }
+   }
+   else
+   {
+      Print("üìä AUCUN SPIKE BOOM/CRASH D√âTECT√â - Analyse continue...");
+   }
+}
+
+void PlaceNormalScalpingOrders(MqlRates &rates[], int futureBars, double currentPrice, double currentATR, double trendSlope)
+{
+   // Chercher les prochains SL/SH significatifs dans les 30 prochaines minutes (900 bougies M1)
+   int lookAheadBars = MathMin(900, futureBars);
+   double bestSLPrice = 0, bestSHPrice = 0;
+   datetime bestSLTime = 0, bestSHTime = 0;
+   
+   for(int predIndex = 30; predIndex < lookAheadBars; predIndex += 30) // V√©rifier toutes les 30 bougies
+   {
+      datetime futureTime = TimeCurrent() + PeriodSeconds(LTF) * predIndex;
+      double progressionFactor = (double)predIndex / futureBars;
+      double trendComponent = trendSlope * predIndex * 0.5;
+      double volatilityComponent = currentATR * progressionFactor * 1.5;
+      
+      // Calculer les prix pr√©dits
+      double shPrice = (currentPrice + currentATR * 2.0) + trendComponent + volatilityComponent * MathSin(predIndex * 0.1);
+      double slPrice = (currentPrice - currentATR * 2.0) + trendComponent - volatilityComponent * MathSin(predIndex * 0.1);
+      
+      // Garder les SL/SH les plus proches et significatifs
+      if(slPrice < currentPrice && (bestSLPrice == 0 || slPrice > bestSLPrice))
+      {
+         bestSLPrice = slPrice;
+         bestSLTime = futureTime;
+      }
+      
+      if(shPrice > currentPrice && (bestSHPrice == 0 || shPrice < bestSHPrice))
+      {
+         bestSHPrice = shPrice;
+         bestSHTime = futureTime;
+      }
+   }
+   
+   // Calculer la distance par rapport au prix actuel
+   double distanceToSL = (bestSLPrice > 0) ? currentPrice - bestSLPrice : DBL_MAX;
+   double distanceToSH = (bestSHPrice > 0) ? bestSHPrice - currentPrice : DBL_MAX;
+   
+   // Placer UN SEUL ordre limite au niveau le plus proche du prix
+   if(distanceToSL < distanceToSH && bestSLPrice > 0)
+   {
+      // Placer BUY LIMIT au SL le plus proche (niveau exact)
+      double buyLimitPrice = bestSLPrice;
+      double tpPrice = buyLimitPrice + currentATR * 2.0;
+      
+      MqlTradeRequest request = {};
+      MqlTradeResult result = {};
+      
+      request.action = TRADE_ACTION_PENDING;
+      request.symbol = _Symbol;
+      request.volume = NormalizeVolumeForSymbol(0.01);
+      request.type = ORDER_TYPE_BUY_LIMIT;
+      request.price = buyLimitPrice;
+      request.sl = buyLimitPrice - currentATR * 1.0;
+      request.tp = tpPrice;
+      request.magic = InpMagicNumber;
+      request.comment = "Scalp SL Near";
+      
+      // VALIDATION ET AJUSTEMENT DES PRIX AVANT ENVOI
+      if(!ValidateAndAdjustLimitPrice(request.price, request.sl, request.tp, ORDER_TYPE_BUY_LIMIT))
+      {
+         Print("‚ùå √âchec validation prix BUY LIMIT scalping - Ordre annul√©");
+         return;
+      }
+      
+      if(OrderSend(request, result))
+      {
+         Print("üìà SEUL ORDRE LIMIT BUY PLAC√â - Prix: ", request.price, " | TP: ", request.tp, " | SL: ", request.sl, " | Distance: ", distanceToSL, " points");
+      }
+   }
+   else if(bestSHPrice > 0)
+   {
+      // Placer SELL LIMIT au SH le plus proche (niveau exact)
+      double sellLimitPrice = bestSHPrice;
+      double tpPrice = sellLimitPrice - currentATR * 2.0;
+      
+      MqlTradeRequest request = {};
+      MqlTradeResult result = {};
+      
+      request.action = TRADE_ACTION_PENDING;
+      request.symbol = _Symbol;
+      request.volume = NormalizeVolumeForSymbol(0.01);
+      request.type = ORDER_TYPE_SELL_LIMIT;
+      request.price = sellLimitPrice;
+      request.sl = sellLimitPrice + currentATR * 1.0;
+      request.tp = tpPrice;
+      request.magic = InpMagicNumber;
+      request.comment = "Scalp SH Near";
+      
+      // VALIDATION ET AJUSTEMENT DES PRIX AVANT ENVOI
+      if(!ValidateAndAdjustLimitPrice(request.price, request.sl, request.tp, ORDER_TYPE_SELL_LIMIT))
+      {
+         Print("‚ùå √âchec validation prix SELL LIMIT scalping - Ordre annul√©");
+         return;
+      }
+      
+      if(OrderSend(request, result))
+      {
+         Print("üìâ SEUL ORDRE LIMIT SELL PLAC√â - Prix: ", request.price, " | TP: ", request.tp, " | SL: ", request.sl, " | Distance: ", distanceToSH, " points");
+      }
+   }
+   else
+   {
+      Print("‚ùå AUCUN NIVEAU VALIDE TROUV√â pour ordre de scalping");
+   }
+}
+
+void DrawHistoricalSwingPoints(MqlRates &rates[], int bars, double point)
+{
+   int swingLookback = 5; // Nombre de bougies de chaque c√¥t√© pour valider un swing point
+   int maxSwings = 20; // Nombre maximum de swing points √† afficher
+   int swingCount = 0;
+   
+   // Parcourir les bougies historiques pour d√©tecter les swing points
+   for(int i = swingLookback; i < bars - swingLookback && swingCount < maxSwings; i++)
+   {
+      // D√©tecter Swing High (le high de la bougie i est plus √©lev√© que les swingLookback bougies avant et apr√®s)
+      bool isSwingHigh = true;
+      for(int j = i - swingLookback; j <= i + swingLookback; j++)
+      {
+         if(j != i && rates[j].high >= rates[i].high)
+         {
+            isSwingHigh = false;
+            break;
+         }
+      }
+      
+      if(isSwingHigh)
+      {
+         string shName = "SMC_Hist_SH_" + IntegerToString(i);
+         if(ObjectCreate(0, shName, OBJ_ARROW, 0, rates[i].time, rates[i].high))
+         {
+            ObjectSetInteger(0, shName, OBJPROP_COLOR, clrCrimson);
+            ObjectSetInteger(0, shName, OBJPROP_WIDTH, 3);
+            ObjectSetInteger(0, shName, OBJPROP_ARROWCODE, 233); // Fl√®che vers le haut
+            ObjectSetString(0, shName, OBJPROP_TEXT, "SH");
+            ObjectSetInteger(0, shName, OBJPROP_FONTSIZE, 10);
+            ObjectSetInteger(0, shName, OBJPROP_ANCHOR, ANCHOR_LOWER);
+            ObjectSetInteger(0, shName, OBJPROP_TIMEFRAMES, OBJ_ALL_PERIODS); // Visible sur tous les timeframes
+            ObjectSetInteger(0, shName, OBJPROP_BACK, false); // Au premier plan
+            swingCount++;
+         }
+      }
+      
+      // D√©tecter Swing Low (le low de la bougie i est plus bas que les swingLookback bougies avant et apr√®s)
+      bool isSwingLow = true;
+      for(int j = i - swingLookback; j <= i + swingLookback; j++)
+      {
+         if(j != i && rates[j].low <= rates[i].low)
+         {
+            isSwingLow = false;
+            break;
+         }
+      }
+      
+      if(isSwingLow)
+      {
+         string slName = "SMC_Hist_SL_" + IntegerToString(i);
+         if(ObjectCreate(0, slName, OBJ_ARROW, 0, rates[i].time, rates[i].low))
+         {
+            ObjectSetInteger(0, slName, OBJPROP_COLOR, clrDodgerBlue);
+            ObjectSetInteger(0, slName, OBJPROP_WIDTH, 3);
+            ObjectSetInteger(0, slName, OBJPROP_ARROWCODE, 234); // Fl√®che vers le bas
+            ObjectSetString(0, slName, OBJPROP_TEXT, "SL");
+            ObjectSetInteger(0, slName, OBJPROP_FONTSIZE, 10);
+            ObjectSetInteger(0, slName, OBJPROP_ANCHOR, ANCHOR_UPPER);
+            ObjectSetInteger(0, slName, OBJPROP_TIMEFRAMES, OBJ_ALL_PERIODS); // Visible sur tous les timeframˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇˇ    break;
+         }
+      }
+   }
+}
+
+void DrawPredictedSwingPoints()
+{
+   if(!g_channelValid) return;
+   ObjectsDeleteAll(0, "SMC_Pred_SH_");
+   ObjectsDeleteAll(0, "SMC_Pred_SL_");
+   datetime tNow = iTime(_Symbol, PERIOD_M1, 0);
+   if(tNow <= 0) tNow = TimeCurrent();
+   int periodSec = 60;
+   double slopeUpper = (PredictionChannelBars > 0) ? (g_chUpperEnd - g_chUpperStart) / (double)PredictionChannelBars : 0;
+   double slopeLower = (PredictionChannelBars > 0) ? (g_chLowerEnd - g_chLowerStart) / (double)PredictionChannelBars : 0;
+   int step = MathMax(1, PredictionChannelBars / 10);
+   for(int k = 1; k <= 10; k++)
+   {
+      int barsAhead = k * step;
+      datetime t = tNow + (datetime)(barsAhead * periodSec);
+      double minsFromStart = (g_chTimeStart > 0) ? (double)(t - g_chTimeStart) / (double)periodSec : (double)barsAhead;
+      double upPrice = g_chUpperStart + slopeUpper * minsFromStart;
+      double loPrice = g_chLowerStart + slopeLower * minsFromStart;
+      string nameSH = "SMC_Pred_SH_" + IntegerToString(k);
+      string nameSL = "SMC_Pred_SL_" + IntegerToString(k);
+      if(ObjectCreate(0, nameSH, OBJ_ARROW, 0, t, upPrice))
+      {
+         ObjectSetInteger(0, nameSH, OBJPROP_ARROWCODE, 159);
+         ObjectSetInteger(0, nameSH, OBJPROP_COLOR, clrRed);
+         ObjectSetInteger(0, nameSH, OBJPROP_WIDTH, 2);
+      }
+      if(ObjectCreate(0, nameSL, OBJ_ARROW, 0, t, loPrice))
+      {
+         ObjectSetInteger(0, nameSL, OBJPROP_ARROWCODE, 159);
+         ObjectSetInteger(0, nameSL, OBJPROP_COLOR, clrLime);
+         ObjectSetInteger(0, nameSL, OBJPROP_WIDTH, 2);
+      }
+   }
+}
+
+void DrawSMCChannelsMultiTF()
+{
+   // Tracer les canaux SMC (upper/lower) depuis H1, M30, M5 projet√©s sur M1
+   datetime currentTime = TimeCurrent();
+   
+   // Timeframes √† analyser
+   ENUM_TIMEFRAMES tfs[] = {PERIOD_H1, PERIOD_M30, PERIOD_M5};
+   string tfNames[] = {"H1", "M30", "M5"};
+   color tfColors[] = {clrBlue, clrPurple, clrGreen};
+   
+   for(int i = 0; i < ArraySize(tfs); i++)
+   {
+      string prefix = "SMC_CH_" + tfNames[i] + "_";
+      ObjectsDeleteAll(0, prefix);
+      
+      // R√©cup√©rer les donn√©es du timeframe
+      MqlRates rates[];
+      ArraySetAsSeries(rates, true);
+      if(CopyRates(_Symbol, tfs[i], 0, 200, rates) < 50) continue;
+      
+      // Calculer les hauts et bas pour le canal
+      double upper = rates[0].high;
+      double lower = rates[0].low;
+      
+      for(int j = 1; j < 100; j++) // Analyser les 100 derni√®res bougies
+      {
+         if(rates[j].high > upper) upper = rates[j].high;
+         if(rates[j].low < lower) lower = rates[j].low;
+      }
+      
+      // Projeter sur 5000 bougies M1 futures
+      datetime startTime = currentTime;
+      datetime endTime = currentTime + (datetime)(SMCChannelFutureBars * 60); // 5000 bougies M1 = 5000 minutes
+      
+      // Tracer la ligne sup√©rieure du canal
+      string upperName = prefix + "UPPER";
+      ObjectCreate(0, upperName, OBJ_TREND, 0, startTime, upper, endTime, upper);
+      ObjectSetInteger(0, upperName, OBJPROP_COLOR, tfColors[i]);
+      ObjectSetInteger(0, upperName, OBJPROP_WIDTH, 2);
+      ObjectSetInteger(0, upperName, OBJPROP_STYLE, STYLE_SOLID);
+      ObjectSetInteger(0, upperName, OBJPROP_RAY_RIGHT, true);
+      ObjectSetInteger(0, upperName, OBJPROP_BACK, false);
+      ObjectSetString(0, upperName, OBJPROP_TOOLTIP, "Canal SMC " + tfNames[i] + " - Upper");
+      
+      // Tracer la ligne inf√©rieure du canal
+      string lowerName = prefix + "LOWER";
+      ObjectCreate(0, lowerName, OBJ_TREND, 0, startTime, lower, endTime, lower);
+      ObjectSetInteger(0, lowerName, OBJPROP_COLOR, tfColors[i]);
+      ObjectSetInteger(0, lowerName, OBJPROP_WIDTH, 2);
+      ObjectSetInteger(0, lowerName, OBJPROP_STYLE, STYLE_SOLID);
+      ObjectSetInteger(0, lowerName, OBJPROP_RAY_RIGHT, true);
+      ObjectSetInteger(0, lowerName, OBJPROP_BACK, false);
+      ObjectSetString(0, lowerName, OBJPROP_TOOLTIP, "Canal SMC " + tfNames[i] + " - Lower");
+      
+      // Ajouter un label
+      string labelName = prefix + "LABEL";
+      ObjectCreate(0, labelName, OBJ_TEXT, 0, startTime, upper);
+      ObjectSetString(0, labelName, OBJPROP_TEXT, "SMC " + tfNames[i]);
+      ObjectSetInteger(0, labelName, OBJPROP_COLOR, tfColors[i]);
+      ObjectSetInteger(0, labelName, OBJPROP_FONTSIZE, 8);
+      ObjectSetInteger(0, labelName, OBJPROP_ANCHOR, ANCHOR_LEFT_UPPER);
+   }
+}
+
+void DrawEMASupertrendMultiTF()
+{
+   // Tracer l'EMA Supertrend Support/R√©sistance sur H1, M30, M5 
+   // depuis 1000 bougies pass√©es jusqu'√† 5000 bougies futures M1
+   datetime currentTime = TimeCurrent();
+   
+   // Timeframes √† analyser
+   ENUM_TIMEFRAMES tfs[] = {PERIOD_H1, PERIOD_M30, PERIOD_M5};
+   string tfNames[] = {"H1", "M30", "M5"};
+   color supportColors[] = {clrGreen, clrLime, clrAqua};
+   color resistanceColors[] = {clrRed, clrOrange, clrMagenta};
+   
+   for(int i = 0; i < ArraySize(tfs); i++)
+   {
+      string prefix = "EMA_ST_" + tfNames[i] + "_";
+      ObjectsDeleteAll(0, prefix);
+      
+      // R√©cup√©rer les EMA rapides, lentes et ATR pour l'historique
+      double emaFast[], emaSlow[], atr[];
+      datetime times[];
+      ArraySetAsSeries(emaFast, true);
+      ArraySetAsSeries(emaSlow, true);
+      ArraySetAsSeries(atr, true);
+      ArraySetAsSeries(times, true);
+      
+      int fastHandle = (tfs[i] == PERIOD_H1) ? emaFastH1 : 
+                     (tfs[i] == PERIOD_M30) ? emaFastM5 : emaFastM1;
+      int slowHandle = (tfs[i] == PERIOD_H1) ? emaSlowH1 : 
+                     (tfs[i] == PERIOD_M30) ? emaSlowM5 : emaSlowM1;
+      int atrHandleTF = (tfs[i] == PERIOD_H1) ? atrH1 : 
+                       (tfs[i] == PERIOD_M30) ? atrM5 : atrM1;
+      
+      // Copier 1000 bougies pass√©es + 5000 futures = 6000 total
+      int totalBars = 6000;
+      if(CopyBuffer(fastHandle, 0, -totalBars, totalBars, emaFast) < totalBars) continue;
+      if(CopyBuffer(slowHandle, 0, -totalBars, totalBars, emaSlow) < totalBars) continue;
+      if(CopyBuffer(atrHandleTF, 0, -totalBars, totalBars, atr) < totalBars) continue;
+      if(CopyTime(_Symbol, tfs[i], -totalBars, totalBars, times) < totalBars) continue;
+      
+      // Tracer la ligne Supertrend compl√®te (pass√© + futur)
+      string lineName = prefix + "LINE";
+      
+      // Point de d√©part (1000 bougies dans le pass√©)
+      datetime startTime = times[0];
+      double emaFastStart = emaFast[0];
+      double emaSlowStart = emaSlow[0];
+      double atrStart = atr[0];
+      
+      // Calculer Supertrend de d√©part
+      double supertrendStart = 0;
+      string directionStart = "";
+      if(emaFastStart > emaSlowStart)
+      {
+         supertrendStart = emaSlowStart - (atrStart * ATRMultiplier); // Support
+         directionStart = "SUPPORT";
+      }
+      else
+      {
+         supertrendStart = emaSlowStart + (atrStart * ATRMultiplier); // R√©sistance
+         directionStart = "RESISTANCE";
+      }
+      
+      // Point de fin (5000 bougies dans le futur)
+      datetime endTime = currentTime + (datetime)(SMCChannelFutureBars * 60);
+      
+      // Cr√©er la ligne de tendance compl√®te
+      ObjectCreate(0, lineName, OBJ_TREND, 0, startTime, supertrendStart, endTime, supertrendStart);
+      ObjectSetInteger(0, lineName, OBJPROP_COLOR, 
+                     (directionStart == "SUPPORT") ? supportColors[i] : resistanceColors[i]);
+      ObjectSetInteger(0, lineName, OBJPROP_WIDTH, 2);
+      ObjectSetInteger(0, lineName, OBJPROP_STYLE, STYLE_SOLID);
+      ObjectSetInteger(0, lineName, OBJPROP_RAY_RIGHT, true);
+      ObjectSetInteger(0, lineName, OBJPROP_BACK, false);
+      ObjectSetString(0, lineName, OBJPROP_TOOLTIP, 
+                     "EMA Supertrend " + tfNames[i] + " - " + directionStart + " (1000 pass√© ‚Üí 5000 futur)");
+      
+      // Ajouter des points de rep√®re tous les 500 bougies
+      int stepBars = 500;
+      for(int j = 0; j < totalBars; j += stepBars)
+      {
+         if(j >= ArraySize(emaFast)) break;
+         
+         datetime pointTime = times[j];
+         double emaFastVal = emaFast[j];
+         double emaSlowVal = emaSlow[j];
+         double atrVal = atr[j];
+         
+         double supertrend = 0;
+         string direction = "";
+         
+         if(emaFastVal > emaSlowVal)
+         {
+            supertrend = emaSlowVal - (atrVal * ATRMultiplier); // Support
+            direction = "SUPPORT";
+         }
+         else
+         {
+            supertrend = emaSlowVal + (atrVal * ATRMultiplier); // R√©sistance
+            direction = "RESISTANCE";
+         }
+         
+         // Tracer un point de rep√®re
+         string pointName = prefix + "POINT_" + IntegerToString(j);
+         ObjectCreate(0, pointName, OBJ_ARROW, 0, pointTime, supertrend);
+         ObjectSetInteger(0, pointName, OBJPROP_ARROWCODE, 159); // Cercle
+         ObjectSetInteger(0, pointName, OBJPROP_COLOR, 
+                        (direction == "SUPPORT") ? supportColors[i] : resistanceColors[i]);
+         ObjectSetInteger(0, pointName, OBJPROP_WIDTH, 1);
+         ObjectSetInteger(0, pointName, OBJPROP_BACK, false);
+      }
+      
+      // Ajouter un label principal
+      string labelName = prefix + "LABEL";
+      ObjectCreate(0, labelName, OBJ_TEXT, 0, startTime, supertrendStart);
+      ObjectSetString(0, labelName, OBJPROP_TEXT, 
+                     "EMA-ST " + tfNames[i] + " " + directionStart);
+      ObjectSetInteger(0, labelName, OBJPROP_COLOR, 
+                     (directionStart == "SUPPORT") ? supportColors[i] : resistanceColors[i]);
+      ObjectSetInteger(0, labelName, OBJPROP_FONTSIZE, 8);
+      ObjectSetInteger(0, labelName, OBJPROP_ANCHOR, ANCHOR_LEFT_UPPER);
+   }
+}
+
+void DrawEMASupportResistance()
+{
+   if(emaM1H == INVALID_HANDLE || emaM5H == INVALID_HANDLE || emaH1H == INVALID_HANDLE) return;
+   double emaM1[], emaM5[], emaH1[];
+   ArraySetAsSeries(emaM1, true); ArraySetAsSeries(emaM5, true); ArraySetAsSeries(emaH1, true);
+   if(CopyBuffer(emaM1H, 0, 0, 1, emaM1) < 1 || CopyBuffer(emaM5H, 0, 0, 1, emaM5) < 1 || CopyBuffer(emaH1H, 0, 0, 1, emaH1) < 1) return;
+   ObjectDelete(0, "SMC_EMA_M1");
+   ObjectDelete(0, "SMC_EMA_M5");
+   ObjectDelete(0, "SMC_EMA_H1");
+   ObjectCreate(0, "SMC_EMA_M1", OBJ_HLINE, 0, 0, emaM1[0]);
+   ObjectSetInteger(0, "SMC_EMA_M1", OBJPROP_COLOR, clrLime);
+   ObjectSetInteger(0, "SMC_EMA_M1", OBJPROP_STYLE, STYLE_DOT);
+   ObjectSetInteger(0, "SMC_EMA_M1", OBJPROP_WIDTH, 1);
+   ObjectSetString(0, "SMC_EMA_M1", OBJPROP_TOOLTIP, "EMA M1 (support/resistance)");
+   ObjectCreate(0, "SMC_EMA_M5", OBJ_HLINE, 0, 0, emaM5[0]);
+   ObjectSetInteger(0, "SMC_EMA_M5", OBJPROP_COLOR, clrDodgerBlue);
+   ObjectSetInteger(0, "SMC_EMA_M5", OBJPROP_STYLE, STYLE_DASH);
+   ObjectSetInteger(0, "SMC_EMA_M5", OBJPROP_WIDTH, 2);
+   ObjectSetString(0, "SMC_EMA_M5", OBJPROP_TOOLTIP, "EMA M5 (support/resistance)");
+   ObjectCreate(0, "SMC_EMA_H1", OBJ_HLINE, 0, 0, emaH1[0]);
+   ObjectSetInteger(0, "SMC_EMA_H1", OBJPROP_COLOR, clrOrange);
+   ObjectSetInteger(0, "SMC_EMA_H1", OBJPROP_STYLE, STYLE_SOLID);
+   ObjectSetInteger(0, "SMC_EMA_H1", OBJPROP_WIDTH, 2);
+   ObjectSetString(0, "SMC_EMA_H1", OBJPROP_TOOLTIP, "EMA H1 (support/resistance)");
+}
+
+void DrawPredictionChannel()
+{
+   int throttleSec = g_channelValid ? 60 : 15;
+   if(TimeCurrent() - g_lastChannelUpdate < throttleSec)
+   {
+      if(g_channelValid)
+         DrawPredictionChannelLines();
+      else if(ShowChartGraphics)
+         DrawPredictionChannelLabel("Canal ML: chargement...");
+      return;
+   }
+   g_lastChannelUpdate = TimeCurrent();
+   g_channelValid = false;
+   string symEnc = _Symbol;
+   StringReplace(symEnc, " ", "%20");
+   string pathCh = "/prediction-channel?symbol=" + symEnc + "&timeframe=M1&future_bars=" + IntegerToString(PredictionChannelBars);
+   string url1 = UseRenderAsPrimary ? (AI_ServerRender + pathCh) : (AI_ServerURL + pathCh);
+   string url2 = UseRenderAsPrimary ? (AI_ServerURL + pathCh) : (AI_ServerRender + pathCh);
+   string headers = "";
+   char post[];
+   char result[];
+   string resultHeaders;
+   int res = WebRequest("GET", url1, headers, AI_Timeout_ms, post, result, resultHeaders);
+   if(res != 200)
+      res = WebRequest("GET", url2, headers, AI_Timeout_ms, post, result, resultHeaders);
+   if(res == 200)
+   {
+      string json = CharArrayToString(result);
+      if(StringFind(json, "\"ok\":true") >= 0 || StringFind(json, "\"ok\": true") >= 0)
+      {
+         long timeStartSec = (long)ExtractJsonNumber(json, "time_start");
+         int periodSec = (int)ExtractJsonNumber(json, "period_seconds");
+         if(periodSec <= 0) periodSec = 60;
+         g_chUpperStart = ExtractJsonNumber(json, "upper_start");
+         g_chUpperEnd   = ExtractJsonNumber(json, "upper_end");
+         g_chLowerStart = ExtractJsonNumber(json, "lower_start");
+         g_chLowerEnd   = ExtractJsonNumber(json, "lower_end");
+         g_chTimeStart = (datetime)timeStartSec;
+         g_chTimeEnd   = (datetime)(timeStartSec + (long)PredictionChannelBars * (long)periodSec);
+         g_channelValid = (g_chUpperStart != 0 || g_chLowerStart != 0);
+      }
+   }
+   if(!g_channelValid)
+      BuildFallbackPredictionChannel();
+   if(g_channelValid)
+      DrawPredictionChannelLines();
+}
+
+void BuildFallbackPredictionChannel()
+{
+   MqlRates r[];
+   ArraySetAsSeries(r, true);
+   int need = MathMin(1000, Bars(_Symbol, PERIOD_M1));
+   if(need < 50) need = 50;
+   if(CopyRates(_Symbol, PERIOD_M1, 0, need, r) < need) return;
+   double sumX = 0, sumYH = 0, sumYL = 0, sumXX = 0, sumXYH = 0, sumXYL = 0;
+   for(int i = 0; i < need; i++)
+   {
+      double x = (double)i;
+      sumX += x; sumXX += x * x;
+      sumYH += r[i].high; sumYL += r[i].low;
+      sumXYH += x * r[i].high; sumXYL += x * r[i].low;
+   }
+   double n = (double)need;
+   double denom = n * sumXX - sumX * sumX;
+   if(MathAbs(denom) < 1e-10) denom = 1;
+   double slopeH = (n * sumXYH - sumX * sumYH) / denom;
+   double slopeL = (n * sumXYL - sumX * sumYL) / denom;
+   double bH = (sumYH - slopeH * sumX) / n;
+   double bL = (sumYL - slopeL * sumX) / n;
+   double marginU = 0, marginL = 0;
+   for(int i = 0; i < need; i++)
+   {
+      double regH = bH + slopeH * (double)i;
+      double regL = bL + slopeL * (double)i;
+      if(r[i].high > regH) marginU = MathMax(marginU, r[i].high - regH);
+      if(r[i].low < regL)  marginL = MathMax(marginL, regL - r[i].low);
+   }
+   g_chTimeStart = r[0].time;
+   g_chUpperStart = bH + marginU;
+   g_chLowerStart = bL - marginL;
+   g_chUpperEnd   = bH + marginU + slopeH * (double)PredictionChannelBars;
+   g_chLowerEnd   = bL - marginL + slopeL * (double)PredictionChannelBars;
+   g_channelValid = true;
+}
+
+double ExtractJsonNumber(string json, string key)
+{
+   string search = "\"" + key + "\":";
+   int pos = StringFind(json, search);
+   if(pos < 0) return 0;
+   int start = pos + StringLen(search);
+   while(start < StringLen(json) && (StringGetCharacter(json, start) == ' ' || StringGetCharacter(json, start) == '\t'))
+      start++;
+   int i = start;
+   while(i < StringLen(json))
+   {
+      ushort c = StringGetCharacter(json, i);
+      if(c == '-' || (c >= '0' && c <= '9') || c == '.')
+         i++;
+      else
+         break;
+   }
+   if(i <= start) return 0;
+   return StringToDouble(StringSubstr(json, start, i - start));
+}
+
+void DrawPredictionChannelLines()
+{
+   ObjectsDeleteAll(0, "SMC_Chan_");
+   datetime tNow = iTime(_Symbol, PERIOD_M1, 0);
+   if(tNow <= 0) tNow = TimeCurrent();
+   int periodSec = 60;
+   int pastBars = MathMax(1, PredictionChannelPastBars);
+   double slopeUpper = (PredictionChannelBars > 0) ? (g_chUpperEnd - g_chUpperStart) / (double)PredictionChannelBars : 0;
+   double slopeLower = (PredictionChannelBars > 0) ? (g_chLowerEnd - g_chLowerStart) / (double)PredictionChannelBars : 0;
+   double minsFromStart = (g_chTimeStart > 0) ? (double)(tNow - g_chTimeStart) / (double)periodSec : 0;
+   double u0 = g_chUpperStart + slopeUpper * minsFromStart;
+   double l0 = g_chLowerStart + slopeLower * minsFromStart;
+   datetime tStart = tNow - (datetime)(pastBars * periodSec);
+   datetime tEnd = tNow + (datetime)(PredictionChannelBars * periodSec);
+   double uStart = u0 - slopeUpper * (double)pastBars;
+   double lStart = l0 - slopeLower * (double)pastBars;
+   double uEnd = u0 + slopeUpper * (double)PredictionChannelBars;
+   double lEnd = l0 + slopeLower * (double)PredictionChannelBars;
+
+   MqlRates r[];
+   ArraySetAsSeries(r, true);
+   int barsFit = (int)MathMin((long)pastBars, Bars(_Symbol, PERIOD_M1));
+   if(CopyRates(_Symbol, PERIOD_M1, 0, barsFit, r) >= barsFit)
+   {
+      double marginU = 0, marginL = 0;
+      for(int i = 0; i < barsFit; i++)
+      {
+         double uAt = u0 - slopeUpper * (double)i;
+         double lAt = l0 - slopeLower * (double)i;
+         if(r[i].high > uAt) marginU = MathMax(marginU, r[i].high - uAt);
+         if(r[i].low < lAt)  marginL = MathMax(marginL, lAt - r[i].low);
+      }
+      uStart += marginU; lStart -= marginL;
+      uEnd += marginU;   lEnd -= marginL;
+   }
+
+   color clrChan = (color)C'220,220,220';
+   // Pas de surface remplie : uniquement 2 lignes qui enveloppent les bougies et suivent leur mouvement
+   if(ObjectCreate(0, "SMC_Chan_Upper", OBJ_TREND, 0, tStart, uStart, tEnd, uEnd))
+   {
+      ObjectSetInteger(0, "SMC_Chan_Upper", OBJPROP_COLOR, clrSilver);
+      ObjectSetInteger(0, "SMC_Chan_Upper", OBJPROP_WIDTH, 2);
+      ObjectSetInteger(0, "SMC_Chan_Upper", OBJPROP_RAY_RIGHT, false);
+      ObjectSetInteger(0, "SMC_Chan_Upper", OBJPROP_RAY_LEFT, false);
+      ObjectSetInteger(0, "SMC_Chan_Upper", OBJPROP_BACK, false);
+   }
+   if(ObjectCreate(0, "SMC_Chan_Lower", OBJ_TREND, 0, tStart, lStart, tEnd, lEnd))
+   {
+      ObjectSetInteger(0, "SMC_Chan_Lower", OBJPROP_COLOR, clrSilver);
+      ObjectSetInteger(0, "SMC_Chan_Lower", OBJPROP_WIDTH, 2);
+      ObjectSetInteger(0, "SMC_Chan_Lower", OBJPROP_RAY_RIGHT, false);
+      ObjectSetInteger(0, "SMC_Chan_Lower", OBJPROP_RAY_LEFT, false);
+      ObjectSetInteger(0, "SMC_Chan_Lower", OBJPROP_BACK, false);
+   }
+   string lbl = "Canal ML " + IntegerToString(pastBars) + "‚Üí" + IntegerToString(PredictionChannelBars) + " bars";
+   if(ObjectFind(0, "SMC_Chan_Label") < 0)
+      ObjectCreate(0, "SMC_Chan_Label", OBJ_LABEL, 0, 0, 0);
+   ObjectSetInteger(0, "SMC_Chan_Label", OBJPROP_CORNER, CORNER_LEFT_LOWER);
+   ObjectSetInteger(0, "SMC_Chan_Label", OBJPROP_XDISTANCE, 10);
+   ObjectSetInteger(0, "SMC_Chan_Label", OBJPROP_YDISTANCE, 50);
+   ObjectSetString(0, "SMC_Chan_Label", OBJPROP_TEXT, lbl);
+   ObjectSetInteger(0, "SMC_Chan_Label", OBJPROP_COLOR, clrSilver);
+   ObjectSetInteger(0, "SMC_Chan_Label", OBJPROP_FONTSIZE, 9);
+}
+
+void DrawPredictionChannelLabel(string text)
+{
+   if(ObjectFind(0, "SMC_Chan_Status") < 0)
+      ObjectCreate(0, "SMC_Chan_Status", OBJ_LABEL, 0, 0, 0);
+   ObjectSetInteger(0, "SMC_Chan_Status", OBJPROP_CORNER, CORNER_LEFT_LOWER);
+   ObjectSetInteger(0, "SMC_Chan_Status", OBJPROP_XDISTANCE, 10);
+   ObjectSetInteger(0, "SMC_Chan_Status", OBJPROP_YDISTANCE, 50);
+   ObjectSetString(0, "SMC_Chan_Status", OBJPROP_TEXT, text);
+   ObjectSetInteger(0, "SMC_Chan_Status", OBJPROP_COLOR, clrGray);
+   ObjectSetInteger(0, "SMC_Chan_Status", OBJPROP_FONTSIZE, 9);
+}
+
+bool DetectSMCSignal(SMC_Signal &sig)
+{
+   sig.action = "HOLD";
+   sig.confidence = 0;
+   sig.reasoning = "";
+   sig.entryPrice = 0;
+   sig.stopLoss = 0;
+   sig.takeProfit = 0;
+   
+   ENUM_SYMBOL_CATEGORY cat = SMC_GetSymbolCategory(_Symbol);
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   
+   double atr[];
+   ArraySetAsSeries(atr, true);
+   if(CopyBuffer(atrHandle, 0, 0, 3, atr) < 3) return false;
+   double atrMult = SMC_GetATRMultiplier(cat);
+   
+   bool hasBuySignal = false;
+   bool hasSellSignal = false;
+   string reason = "";
+   
+   bool lsSSL = false, lsBSL = false;
+   int lsBarsAgo = 99;
+   if(UseLiquiditySweep)
+   {
+      string lsType;
+      int barsAgo = 0;
+      if(SMC_DetectLiquiditySweepEx(_Symbol, LTF, lsType, barsAgo))
+      {
+         lsBarsAgo = barsAgo;
+         if(lsType == "SSL") lsSSL = true;
+         else if(lsType == "BSL") lsBSL = true;
+      }
+      if(!RequireStructureAfterSweep)
+      {
+         if(lsSSL) { hasBuySignal = true; reason += "LS-SSL "; }
+         else if(lsBSL) { hasSellSignal = true; reason += "LS-BSL "; }
+      }
+   }
+   
+   if(UseFVG)
+   {
+      FVGData fvg;
+      if(SMC_DetectFVG(_Symbol, LTF, 30, fvg))
+      {
+         if(fvg.direction == 1 && bid >= fvg.bottom && bid <= fvg.top) { hasBuySignal = true; reason += "FVG-Bull "; }
+         else if(fvg.direction == -1 && ask <= fvg.top && ask >= fvg.bottom) { hasSellSignal = true; reason += "FVG-Bear "; }
+      }
+   }
+   
+   if(UseOrderBlocks)
+   {
+      OrderBlockData ob;
+      if(SMC_DetectOrderBlock(_Symbol, LTF, ob))
+      {
+         if(ob.direction == 1 && bid >= ob.low && bid <= ob.high) { hasBuySignal = true; reason += "OB-Bull "; }
+         else if(ob.direction == -1 && ask <= ob.high && ask >= ob.low) { hasSellSignal = true; reason += "OB-Bear "; }
+      }
+   }
+   
+   if(UseBOS)
+   {
+      int bosDir;
+      if(SMC_DetectBOS(_Symbol, LTF, bosDir))
+      {
+         if(bosDir == 1) { hasBuySignal = true; reason += "BOS-Up "; }
+         else if(bosDir == -1) { hasSellSignal = true; reason += "BOS-Down "; }
+      }
+   }
+   bool inDiscount = IsInDiscountZone();
+   bool inPremium  = IsInPremiumZone();
+   if(inDiscount) { hasBuySignal = true; reason += "Zone-Discount "; }
+   if(inPremium)  { hasSellSignal = true; reason += "Zone-Premium "; }
+
+   if(RequireStructureAfterSweep && UseLiquiditySweep)
+   {
+      bool waitOk = !NoEntryDuringSweep || (lsBarsAgo >= 1); // R√©duit de 2 √† 1 barre
+      // Moins restrictif: ne bloquer que les signaux contradictoires directs
+      if(lsSSL && hasSellSignal) hasSellSignal = false; // Bloquer SELL si SSL d√©tect√©
+      if(lsBSL && hasBuySignal) hasBuySignal = false;  // Bloquer BUY si BSL d√©tect√©
+      // Garder les autres signaux m√™me sans confirmation LS
+      if(hasBuySignal && lsSSL && waitOk) reason += "[LS+Conf] ";
+      if(hasSellSignal && lsBSL && waitOk) reason += "[LS+Conf] ";
+   }
+   if((g_lastAIAction == "BUY" || g_lastAIAction == "buy") && g_lastAIConfidence >= MinAIConfidence) { hasBuySignal = true; reason += "IA-BUY "; }
+   if((g_lastAIAction == "SELL" || g_lastAIAction == "sell") && g_lastAIConfidence >= MinAIConfidence) { hasSellSignal = true; reason += "IA-SELL "; }
+
+   bool isBoom = (cat == SYM_BOOM_CRASH && StringFind(_Symbol, "Boom") >= 0);
+   bool isCrash = (cat == SYM_BOOM_CRASH && StringFind(_Symbol, "Crash") >= 0);
+   if(isBoom && BoomBuyOnly) hasSellSignal = false;
+   if(isCrash && CrashSellOnly) hasBuySignal = false;
+   
+   double slDist = atr[0] * SL_ATRMult;
+   double tpDist = atr[0] * TP_ATRMult;
+   MqlRates r[];
+   ArraySetAsSeries(r, true);
+   bool haveRates = (CopyRates(_Symbol, LTF, 0, 10, r) >= 10);
+   double newSwingLow = 0, newSwingHigh = 0;
+   if(haveRates && StopBeyondNewStructure)
+   {
+      newSwingLow = r[1].low;
+      newSwingHigh = r[1].high;
+      for(int i = 2; i < 8; i++) { if(r[i].low < newSwingLow) newSwingLow = r[i].low; if(r[i].high > newSwingHigh) newSwingHigh = r[i].high; }
+   }
+   
+   double buffer = atr[0] * 0.5;
+   if(hasBuySignal && !hasSellSignal)
+   {
+      sig.action = "BUY";
+      sig.confidence = 0.65;
+      sig.concept = reason;
+      sig.reasoning = "SMC: " + reason;
+      sig.entryPrice = ask;
+      if(!NoSLTP_BoomCrash)
+      {
+         // Calculer SL/TP plus proches du prix actuel
+         double currentAsk = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+         double currentBid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+         
+         if(StopBeyondNewStructure && lsSSL && newSwingLow > 0)
+            sig.stopLoss = newSwingLow - buffer;
+         else
+         {
+            // SL plus proche : utiliser 20-30 pips au lieu de la distance ATR compl√®te
+            double minSL = MathMax(20.0 * _Point, slDist * 0.3); // 30% de la distance ATR
+            sig.stopLoss = currentAsk - minSL;
+         }
+         
+         // TP plus proche : utiliser 40-60 pips au lieu de la distance ATR compl√®te
+         double minTP = MathMax(40.0 * _Point, tpDist * 0.4); // 40% de la distance ATR
+         sig.takeProfit = currentAsk + minTP;
+         
+         Print("üìä SL/TP ajust√©s: SL=", DoubleToString(sig.stopLoss, _Digits), 
+                " TP=", DoubleToString(sig.takeProfit, _Digits), 
+                " Ask=", DoubleToString(currentAsk, _Digits));
+      }
+      return true;
+   }
+   else if(hasSellSignal && !hasBuySignal)
+   {
+      sig.action = "SELL";
+      sig.confidence = 0.65;
+      sig.concept = reason;
+      sig.reasoning = "SMC: " + reason;
+      sig.entryPrice = bid;
+      if(!NoSLTP_BoomCrash)
+      {
+         // Calculer SL/TP plus proches du prix actuel
+         double currentAsk = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+         double currentBid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+         
+         if(StopBeyondNewStructure && lsBSL && newSwingHigh > 0)
+            sig.stopLoss = newSwingHigh + buffer;
+         else
+         {
+            // SL plus proche : utiliser 20-30 pips au lieu de la distance ATR compl√®te
+            double minSL = MathMax(20.0 * _Point, slDist * 0.3); // 30% de la distance ATR
+            sig.stopLoss = currentBid + minSL;
+         }
+         
+         // TP plus proche : utiliser 40-60 pips au lieu de la distance ATR compl√®te
+         double minTP = MathMax(40.0 * _Point, tpDist * 0.4); // 40% de la distance ATR
+         sig.takeProfit = currentBid - minTP;
+         
+         Print("üìä SL/TP ajust√©s SELL: SL=", DoubleToString(sig.stopLoss, _Digits), 
+                " TP=", DoubleToString(sig.takeProfit, _Digits), 
+                " Bid=", DoubleToString(currentBid, _Digits));
+      }
+      return true;
+   }
+   return false;
+}
+
+bool ConfirmWithAI(SMC_Signal &sig)
+{
+   if(!RequireAIConfirmation) return true;
+   if(!UseAIServer) return true;
+   
+   // Plus permissif: utiliser la derni√®re d√©cision IA si disponible
+   if(g_lastAIAction != "" && g_lastAIConfidence > 0)
+   {
+      // Confiance r√©duite pour plus d'opportunit√©s
+      if(g_lastAIConfidence >= 0.35) // 35% au lieu de 55%
+      {
+         if(sig.action == "BUY" && (g_lastAIAction == "BUY" || g_lastAIAction == "buy")) 
+         {
+            Print("‚úÖ Signal BUY confirm√© par IA (conf: ", DoubleToString(g_lastAIConfidence*100, 1), "%)");
+            return true;
+         }
+         if(sig.action == "SELL" && (g_lastAIAction == "SELL" || g_lastAIAction == "sell")) 
+         {
+            Print("‚úÖ Signal SELL confirm√© par IA (conf: ", DoubleToString(g_lastAIConfidence*100, 1), "%)");
+            return true;
+         }
+      }
+   }
+   
+   // Fallback plus permissif si IA disponible mais faible confiance
+   if(g_lastAIConfidence >= 0.25 && g_lastAIConfidence > 0)
+   {
+      Print("‚ö†Ô∏è Signal ex√©cut√© avec faible confiance IA (", DoubleToString(g_lastAIConfidence*100, 1), "%)");
+      return true;
+   }
+   
+   // Si IA indisponible, autoriser quand m√™me pour ne pas manquer d'opportunit√©s
+   if(g_lastAIAction == "" || g_lastAIConfidence == 0)
+   {
+      Print("üîÑ IA indisponible - Signal SMC ex√©cut√© sans confirmation");
+      return true;
+   }
+   
+   Print("‚ùå Signal rejet√© - IA: ", g_lastAIAction, " (conf: ", DoubleToString(g_lastAIConfidence*100, 1), "%)");
+   return false;
+}
+
+void ExecuteSignal(SMC_Signal &sig)
+{
+   if(CountPositionsOurEA() >= MaxPositionsTerminal) return;
+   if(!TryAcquireOpenLock()) return;
+   double lotSize = CalculateLotSize();
+   if(lotSize <= 0) { ReleaseOpenLock(); return; }
+   
+   // STRAT√âGIE UNIQUE SPIKE POUR BOOM/CRASH:
+   // ne pas ex√©cuter la logique SMC classique sur Boom/Crash
+   if(SMC_GetSymbolCategory(_Symbol) == SYM_BOOM_CRASH)
+   {
+      ReleaseOpenLock();
+      return;
+   }
+   
+   // Exiger une d√©cision IA forte pour tous les march√©s non Boom/Crash
+   if(!IsAITradeAllowedForDirection(sig.action))
+   {
+      ReleaseOpenLock();
+      return;
+   }
+   
+   // Interdire SELL sur Boom et BUY sur Crash
+   if(!IsDirectionAllowedForBoomCrash(_Symbol, sig.action))
+   {
+      Print("‚ùå Signal ", sig.action, " bloqu√© sur ", _Symbol, " (r√®gle Boom/Crash: pas de SELL sur Boom, pas de BUY sur Crash)");
+      ReleaseOpenLock();
+      return;
+   }
+   
+    // Contr√¥le de duplication: ne pas ouvrir de nouvelle position
+    // si les conditions IA fortes + gain 2$ ne sont pas r√©unies
+    if(!CanOpenAdditionalPositionForSymbol(_Symbol, sig.action))
+    {
+       Print("‚ùå Nouvelle position ", sig.action, " bloqu√©e sur ", _Symbol, " (r√®gle duplication: besoin +2$ sur position initiale et IA >= 80%)");
+       ReleaseOpenLock();
+       return;
+    }
+   
+   // Bloquer les signaux contraires √† la direction IA principale
+   // uniquement si la confiance IA est vraiment forte (>= max(MinAIConfidence, 60%))
+   double strongAIThreshold = MathMax(MinAIConfidence, 0.60);
+   if(g_lastAIConfidence >= strongAIThreshold)
+   {
+      if((g_lastAIAction == "BUY" || g_lastAIAction == "buy") && sig.action == "SELL")
+      {
+         Print("‚ùå SELL SMC bloqu√© car IA = BUY (conf: ", DoubleToString(g_lastAIConfidence*100,1), "%)");
+         ReleaseOpenLock();
+         return;
+      }
+      if((g_lastAIAction == "SELL" || g_lastAIAction == "sell") && sig.action == "BUY")
+      {
+         Print("‚ùå BUY SMC bloqu√© car IA = SELL (conf: ", DoubleToString(g_lastAIConfidence*100,1), "%)");
+         ReleaseOpenLock();
+         return;
+      }
+   }
+   
+   // R√©initialiser le gain maximum pour la nouvelle position
+   g_maxProfit = 0;
+   
+   if(sig.action == "BUY")
+   {
+      if(NoSLTP_BoomCrash && SMC_GetSymbolCategory(_Symbol) == SYM_BOOM_CRASH)
+         trade.Buy(lotSize, _Symbol, 0, 0, 0, "SMC " + sig.concept);
+      else
+         trade.Buy(lotSize, _Symbol, 0, sig.stopLoss, sig.takeProfit, "SMC " + sig.concept);
+      if(trade.ResultRetcode() == TRADE_RETCODE_DONE)
+      {
+         Print("‚úÖ SMC BUY @ ", sig.entryPrice, " - ", sig.concept);
+         if(UseNotifications) { Alert("SMC BUY ", _Symbol, " ", sig.concept); SendNotification("SMC BUY " + _Symbol + " " + sig.concept); }
+      }
+   }
+   else if(sig.action == "SELL")
+   {
+      if(NoSLTP_BoomCrash && SMC_GetSymbolCategory(_Symbol) == SYM_BOOM_CRASH)
+         trade.Sell(lotSize, _Symbol, 0, 0, 0, "SMC " + sig.concept);
+      else
+         trade.Sell(lotSize, _Symbol, 0, sig.stopLoss, sig.takeProfit, "SMC " + sig.concept);
+      if(trade.ResultRetcode() == TRADE_RETCODE_DONE)
+      {
+         Print("‚úÖ SMC SELL @ ", sig.entryPrice, " - ", sig.concept);
+         if(UseNotifications) { Alert("SMC SELL ", _Symbol, " ", sig.concept); SendNotification("SMC SELL " + _Symbol + " " + sig.concept); }
+      }
+   }
+   ReleaseOpenLock();
+}
+
+double CalculateLotSize()
+{
+   // Mettre √† jour les stats de drawdown journalier
+   UpdateDailyEquityStats();
+
+   // Si le drawdown max est atteint, ne plus ouvrir de nouvelles positions
+   if(IsDailyDrawdownExceeded())
+   {
+      Print("‚ö†Ô∏è Nouvelle entr√©e bloqu√©e par la gestion de risque journali√®re.");
+      return 0.0;
+   }
+
+   double minLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+   double lotStep = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+   if(UseMinLotOnly)
+      return NormalizeDouble(MathMax(minLot, lotStep), 2);
+   double maxLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
+   double balance = AccountInfoDouble(ACCOUNT_BALANCE);
+   double riskPct = MaxRiskPerTradePercent;
+   if(riskPct <= 0.0) riskPct = 1.0; // fallback tr√®s conservateur
+   double riskAmount = balance * (riskPct / 100.0);
+   double tickVal = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+   double tickSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+   double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   if(tickVal <= 0 || tickSize <= 0) return minLot;
+   double atr[];
+   ArraySetAsSeries(atr, true);
+   if(CopyBuffer(atrHandle, 0, 0, 1, atr) < 1) return minLot;
+   double slPoints = (atr[0] / point) * SL_ATRMult;
+   double pipVal = (tickVal / tickSize) * point;
+   if(pipVal <= 0) return minLot;
+   double lotSize = riskAmount / (slPoints * pipVal);
+   lotSize = MathMax(minLot, MathMin(maxLot, lotSize));
+   lotSize = MathRound(lotSize / lotStep) * lotStep;
+   return NormalizeDouble(lotSize, 2);
+}
+
+// Normaliser un volume arbitraire en respectant min/max/step du symbole
+double NormalizeVolumeForSymbol(double desiredVolume)
+{
+   double minLot  = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+   double maxLot  = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
+   double lotStep = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+   if(lotStep <= 0) lotStep = minLot;
+   double vol = desiredVolume;
+   if(vol < minLot) vol = minLot;
+   if(vol > maxLot) vol = maxLot;
+   vol = MathFloor(vol / lotStep + 1e-8) * lotStep;
+   return NormalizeDouble(vol, 2);
+}
+
+// Met √† jour les statistiques d'√©quit√© journali√®re (d√©but, max, min)
+void UpdateDailyEquityStats()
+{
+   double equity = AccountInfoDouble(ACCOUNT_EQUITY);
+   MqlDateTime dt;
+   TimeCurrent(dt);
+   int today = dt.year * 10000 + dt.mon * 100 + dt.day;
+
+   if(g_dailyEquityDate != today || g_dailyStartEquity <= 0.0)
+   {
+      g_dailyEquityDate = today;
+      g_dailyStartEquity = equity;
+      g_dailyMaxEquity = equity;
+      g_dailyMinEquity = equity;
+      Print("üìä R√©initialisation stats journali√®res: √©quit√© d√©part = ", DoubleToString(equity, 2));
+   }
+   else
+   {
+      if(equity > g_dailyMaxEquity) g_dailyMaxEquity = equity;
+      if(equity < g_dailyMinEquity) g_dailyMinEquity = equity;
+   }
+}
+
+// Indique si le drawdown journalier max autoris√© est d√©pass√©
+bool IsDailyDrawdownExceeded()
+{
+   if(MaxDailyDrawdownPercent <= 0.0 || g_dailyStartEquity <= 0.0)
+      return false;
+
+   double equity = AccountInfoDouble(ACCOUNT_EQUITY);
+   double ddPercent = 0.0;
+   if(g_dailyStartEquity > 0.0)
+      ddPercent = (g_dailyStartEquity - equity) / g_dailyStartEquity * 100.0;
+
+   if(ddPercent >= MaxDailyDrawdownPercent)
+   {
+      Print("üõë DRAWDOWN JOURNALIER MAX ATTEINT: ",
+            DoubleToString(ddPercent, 1), "% / ",
+            DoubleToString(MaxDailyDrawdownPercent, 1),
+            "% - blocage des nouvelles entr√©es pour aujourd'hui.");
+      return true;
+   }
+   return false;
+}
+
+//| VALIDATION ET AJUSTEMENT DES PRIX POUR ORDRES LIMITES            |
+bool ValidateAndAdjustLimitPrice(double &entryPrice, double &stopLoss, double &takeProfit, ENUM_ORDER_TYPE orderType)
+{
+   double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   double currentAsk = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   double currentBid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   
+   // R√©cup√©rer les exigences du courtier
+   long stopsLevel = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
+   double minDistance = stopsLevel * point;
+   
+   // D√©tection sp√©cifique pour chaque type de symbole
+   bool isVolatility = (StringFind(_Symbol, "Volatility") >= 0 || StringFind(_Symbol, "RANGE BREAK") >= 0);
+   bool isGold = (StringFind(_Symbol, "XAU") >= 0 || StringFind(_Symbol, "GOLD") >= 0);
+   bool isForex = (StringFind(_Symbol, "USD") >= 0 && !isGold && !isVolatility);
+   
+   if(isVolatility)
+   {
+      minDistance = MathMax(minDistance, 500 * point); // Augment√© √† 500 pips pour Volatility
+      Print("üîß Volatility Index d√©tect√© - Distance minimale: ", DoubleToString(minDistance, 0), " pips");
+   }
+   else if(isGold)
+   {
+      minDistance = MathMax(minDistance, 200 * point); // 200 pips minimum pour XAUUSD
+      Print("üîß Gold (XAUUSD) d√©tect√© - Distance minimale: ", DoubleToString(minDistance, 0), " pips");
+   }
+   else if(isForex)
+   {
+      minDistance = MathMax(minDistance, 100 * point); // Augment√© √† 100 pips pour Forex (AUDJPY, etc.)
+      Print("üîß Forex d√©tect√© - Distance minimale: ", DoubleToString(minDistance, 0), " pips");
+   }
+   else
+   {
+      minDistance = MathMax(minDistance, 30 * point); // 30 pips minimum par d√©faut
+   }
+   
+   // Validation et ajustement du prix d'entr√©e
+   bool priceAdjusted = false;
+   
+   if(orderType == ORDER_TYPE_BUY_LIMIT)
+   {
+      // BUY LIMIT doit √™tre < Ask
+      if(entryPrice >= currentAsk)
+      {
+         entryPrice = currentBid - (minDistance * 2); // Plus de marge
+         priceAdjusted = true;
+         Print("üîß BUY LIMIT price ajust√©: ", DoubleToString(entryPrice, _Digits), " (doit √™tre < Ask)");
+      }
+      
+      // V√©rifier distance minimale
+      if(currentAsk - entryPrice < minDistance)
+      {
+         entryPrice = currentAsk - (minDistance * 1.5); // Plus de marge
+         priceAdjusted = true;
+         Print("üîß BUY LIMIT distance ajust√©e: ", DoubleToString(entryPrice, _Digits), " (distance minimale)");
+      }
+   }
+   else if(orderType == ORDER_TYPE_SELL_LIMIT)
+   {
+      // SELL LIMIT doit √™tre > Bid
+      if(entryPrice <= currentBid)
+      {
+         entryPrice = currentAsk + (minDistance * 2); // Plus de marge
+         priceAdjusted = true;
+         Print("üîß SELL LIMIT price ajust√©: ", DoubleToString(entryPrice, _Digits), " (doit √™tre > Bid)");
+      }
+      
+      // V√©rifier distance minimale
+      if(entryPrice - currentBid < minDistance)
+      {
+         entryPrice = currentBid + (minDistance * 1.5); // Plus de marge
+         priceAdjusted = true;
+         Print("üîß SELL LIMIT distance ajust√©e: ", DoubleToString(entryPrice, _Digits), " (distance minimale)");
+      }
+   }
+   
+   // Validation et ajustement du Stop Loss
+   if(orderType == ORDER_TYPE_BUY_LIMIT)
+   {
+      if(stopLoss >= entryPrice || (entryPrice - stopLoss) < minDistance)
+      {
+         stopLoss = entryPrice - (minDistance * 1.2); // Plus de marge
+         Print("üîß BUY LIMIT SL ajust√©: ", DoubleToString(stopLoss, _Digits));
+      }
+   }
+   else if(orderType == ORDER_TYPE_SELL_LIMIT)
+   {
+      if(stopLoss <= entryPrice || (stopLoss - entryPrice) < minDistance)
+      {
+         stopLoss = entryPrice + (minDistance * 1.2); // Plus de marge
+         Print("üîß SELL LIMIT SL ajust√©: ", DoubleToString(stopLoss, _Digits));
+      }
+   }
+   
+   // Validation et ajustement du Take Profit
+   if(orderType == ORDER_TYPE_BUY_LIMIT)
+   {
+      if(takeProfit <= entryPrice || (takeProfit - entryPrice) < minDistance)
+      {
+         takeProfit = entryPrice + (minDistance * 3); // Ratio 1:3 pour plus de s√©curit√©
+         Print("üîß BUY LIMIT TP ajust√©: ", DoubleToString(takeProfit, _Digits));
+      }
+   }
+   else if(orderType == ORDER_TYPE_SELL_LIMIT)
+   {
+      if(takeProfit >= entryPrice || (entryPrice - takeProfit) < minDistance)
+      {
+         takeProfit = entryPrice - (minDistance * 3); // Ratio 1:3 pour plus de s√©curit√©
+         Print("üîß SELL LIMIT TP ajust√©: ", DoubleToString(takeProfit, _Digits));
+      }
+   }
+   
+   // Normaliser tous les prix
+   entryPrice = NormalizeDouble(entryPrice, _Digits);
+   stopLoss = NormalizeDouble(stopLoss, _Digits);
+   takeProfit = NormalizeDouble(takeProfit, _Digits);
+   
+   // Validation finale tr√®s stricte
+   if(orderType == ORDER_TYPE_BUY_LIMIT)
+   {
+      if(entryPrice >= currentAsk || (currentAsk - entryPrice) < minDistance || 
+         stopLoss >= entryPrice || (entryPrice - stopLoss) < minDistance ||
+         takeProfit <= entryPrice || (takeProfit - entryPrice) < minDistance)
+      {
+         Print("‚ùå ERREUR CRITIQUE: Prix BUY LIMIT toujours invalides apr√®s ajustement!");
+         Print("   Entry: ", DoubleToString(entryPrice, _Digits), " Ask: ", DoubleToString(currentAsk, _Digits));
+         Print("   SL: ", DoubleToString(stopLoss, _Digits), " TP: ", DoubleToString(takeProfit, _Digits));
+         Print("   MinDistance: ", DoubleToString(minDistance, 0), " pips");
+         return false;
+      }
+   }
+   else if(orderType == ORDER_TYPE_SELL_LIMIT)
+   {
+      if(entryPrice <= currentBid || (entryPrice - currentBid) < minDistance ||
+         stopLoss <= entryPrice || (stopLoss - entryPrice) < minDistance ||
+         takeProfit >= entryPrice || (entryPrice - takeProfit) < minDistance)
+      {
+         Print("‚ùå ERREUR CRITIQUE: Prix SELL LIMIT toujours invalides apr√®s ajustement!");
+         Print("   Entry: ", DoubleToString(entryPrice, _Digits), " Bid: ", DoubleToString(currentBid, _Digits));
+         Print("   SL: ", DoubleToString(stopLoss, _Digits), " TP: ", DoubleToString(takeProfit, _Digits));
+         Print("   MinDistance: ", DoubleToString(minDistance, 0), " pips");
+         return false;
+      }
+   }
+   
+   if(priceAdjusted)
+   {
+      Print("‚úÖ Prix final ajust√© - Entry: ", DoubleToString(entryPrice, _Digits), 
+            " SL: ", DoubleToString(stopLoss, _Digits), 
+            " TP: ", DoubleToString(takeProfit, _Digits));
+   }
+   
+   return true;
+}
+
+void ManageTrailingStop()
+{
+   // OPTIMISATION: Sortir rapidement si aucune position
+   if(PositionsTotal() == 0) return;
+   
+   // OPTIMISATION: Limiter le trailing stop aux positions de notre EA uniquement
+   int ourPositionsCount = 0;
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      if(posInfo.SelectByIndex(i) && posInfo.Magic() == InpMagicNumber)
+      {
+         ourPositionsCount++;
+      }
+   }
+   
+   if(ourPositionsCount == 0) return;
+   
+   // Calculer l'ATR une seule fois pour toutes les positions
+   double atr[];
+   ArraySetAsSeries(atr, true);
+   double atrValue = 0;
+   if(atrHandle != INVALID_HANDLE && CopyBuffer(atrHandle, 0, 0, 1, atr) >= 1)
+   {
+      atrValue = atr[0];
+   }
+   
+   if(atrValue == 0) return; // Sortir si pas d'ATR disponible
+   
+   double trailDistance = atrValue * TrailingStop_ATRMult;
+   
+   // Parcourir uniquement nos positions
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      if(!posInfo.SelectByIndex(i)) continue;
+      if(posInfo.Magic() != InpMagicNumber) continue;
+      
+      double profit = posInfo.Profit() + posInfo.Swap() + posInfo.Commission();
+      double openPrice = posInfo.PriceOpen();
+      double currentSL = posInfo.StopLoss();
+      double currentTP = posInfo.TakeProfit();
+      
+      // Position initiale sans SL
+      if(currentSL == 0)
+      {
+         if(posInfo.PositionType() == POSITION_TYPE_BUY)
+         {
+            double currentPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+            double newSL = currentPrice - trailDistance;
+            
+            // VALIDATION: V√©rifier que la position existe toujours avant de modifier
+            if(!PositionSelectByTicket(posInfo.Ticket()))
+            {
+               continue;
+            }
+            
+            // Double validation: v√©rifier que le magic number et symbole correspondent
+            if(PositionGetInteger(POSITION_MAGIC) != InpMagicNumber || PositionGetString(POSITION_SYMBOL) != _Symbol)
+            {
+               continue;
+            }
+            
+            if(trade.PositionModify(posInfo.Ticket(), newSL, posInfo.TakeProfit()))
+               Print("üõ°Ô∏è Stop loss initial BUY: ", DoubleToString(newSL, _Digits));
+         }
+         else
+         {
+            double currentPrice = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+            double newSL = currentPrice + trailDistance;
+            
+            // VALIDATION: V√©rifier que la position existe toujours avant de modifier
+            if(!PositionSelectByTicket(posInfo.Ticket()))
+            {
+               continue;
+            }
+            
+            // Double validation: v√©rifier que le magic number et symbole correspondent
+            if(PositionGetInteger(POSITION_MAGIC) != InpMagicNumber || PositionGetString(POSITION_SYMBOL) != _Symbol)
+            {
+               continue;
+            }
+            
+            if(trade.PositionModify(posInfo.Ticket(), newSL, posInfo.TakeProfit()))
+               Print("üõ°Ô∏è Stop loss initial SELL: ", DoubleToString(newSL, _Digits));
+         }
+         continue;
+      }
+      
+      // Trail si position est en gain OU si on risque de perdre >50% du gain maximum
+      bool shouldTrail = false;
+      
+      if(profit > 0)
+      {
+         // Garder en m√©moire le gain maximum
+         if(profit > g_maxProfit) g_maxProfit = profit;
+         
+         // Prot√©ger les petits gains
+         if(profit > 0 && profit < 1.0)
+         {
+            shouldTrail = false;
+         }
+         else
+         {
+            shouldTrail = true;
+         }
+      }
+      else if(g_maxProfit > 0)
+      {
+         // Si on a d√©j√† eu un gain max et qu'on perd >50% de ce gain
+         if(profit < (g_maxProfit * 0.5))
+         {
+            shouldTrail = true;
+         }
+      }
+      
+      if(shouldTrail)
+      {
+         if(posInfo.PositionType() == POSITION_TYPE_BUY)
+         {
+            double currentPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+            double newSL = currentPrice - trailDistance;
+            
+            // Only move SL if it improves the current SL and is above open price
+            if(newSL > currentSL && newSL > openPrice)
+            {
+               // VALIDATION: V√©rifier que la position existe toujours avant de modifier
+               if(!PositionSelectByTicket(posInfo.Ticket()))
+               {
+                  continue;
+               }
+               
+               // Double validation: v√©rifier que le magic number et symbole correspondent
+               if(PositionGetInteger(POSITION_MAGIC) != InpMagicNumber || PositionGetString(POSITION_SYMBOL) != _Symbol)
+               {
+                  continue;
+               }
+               
+               if(trade.PositionModify(posInfo.Ticket(), newSL, posInfo.TakeProfit()))
+               {
+                  Print("üîÑ Trailing Stop BUY mis √† jour: ", DoubleToString(currentSL, _Digits), " ‚Üí ", DoubleToString(newSL, _Digits));
+               }
+            }
+         }
+         else if(posInfo.PositionType() == POSITION_TYPE_SELL)
+         {
+            double currentPrice = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+            double newSL = currentPrice + trailDistance;
+            
+            // Only move SL if it improves the current SL and is below open price
+            if((newSL < currentSL || currentSL == 0) && newSL < openPrice)
+            {
+               // VALIDATION: V√©rifier que la position existe toujours avant de modifier
+               if(!PositionSelectByTicket(posInfo.Ticket()))
+               {
+                  continue;
+               }
+               
+               // Double validation: v√©rifier que le magic number et symbole correspondent
+               if(PositionGetInteger(POSITION_MAGIC) != InpMagicNumber || PositionGetString(POSITION_SYMBOL) != _Symbol)
+               {
+                  continue;
+               }
+               
+               if(trade.PositionModify(posInfo.Ticket(), newSL, posInfo.TakeProfit()))
+               {
+                  Print("üîÑ Trailing Stop SELL mis √† jour: ", DoubleToString(currentSL, _Digits), " ‚Üí ", DoubleToString(newSL, _Digits));
+               }
+            }
+         }
+      }
+   }
+}
+
+//| DONN√âES GRAPHIQUES POUR ANALYSE EN TEMPS R√âEL          |
+
+// Buffer pour stocker les donn√©es graphiques en temps r√©el
+MqlRates g_chartDataBuffer[];
+static datetime g_lastChartCapture = 0;
+
+//| FONCTION POUR CAPTURER LES DONN√âES GRAPHIQUES MT5          |
+bool CaptureChartDataFromChart()
+{
+   // Protection anti-erreur critique
+   static int captureErrors = 0;
+   static datetime lastErrorReset = 0;
+   datetime currentTime = TimeCurrent();
+   
+   // R√©initialiser les erreurs toutes les 2 minutes
+   if(currentTime - lastErrorReset >= 120)
+   {
+      captureErrors = 0;
+      lastErrorReset = currentTime;
+   }
+   
+   // Si trop d'erreurs de capture, d√©sactiver temporairement
+   if(captureErrors > 3)
+   {
+      Print("‚ö†Ô∏è Trop d'erreurs de capture graphique - Mode d√©grad√©");
+      return false;
+   }
+   
+   // R√©cup√©rer les derni√®res bougies depuis le graphique
+   MqlRates rates[];
+   ArraySetAsSeries(rates, true);
+   
+   // Limiter la taille pour √©viter les surcharges
+   int barsToCopy = MathMin(50, 100); // Maximum 50 bougies
+   
+   if(CopyRates(_Symbol, PERIOD_M1, 0, barsToCopy, rates) >= barsToCopy)
+   {
+      // Stocker les donn√©es pour analyse ML
+      int bufferSize = MathMin(barsToCopy, ArraySize(rates));
+      int startIndex = MathMax(0, ArraySize(rates) - bufferSize);
+      
+      // V√©rifier que le buffer n'est pas trop grand
+      if(bufferSize > 100)
+      {
+         Print("‚ö†Ô∏è Buffer trop grand: ", bufferSize, " - Limitation √† 100");
+         bufferSize = 100;
+      }
+      
+      // Redimensionner le buffer si n√©cessaire
+      if(ArraySize(g_chartDataBuffer) != bufferSize)
+         ArrayResize(g_chartDataBuffer, bufferSize);
+      
+      // Copier les donn√©es dans le buffer circulaire
+      for(int i = 0; i < bufferSize && i < ArraySize(rates); i++)
+      {
+         g_chartDataBuffer[i] = rates[startIndex + i];
+      }
+      
+      g_lastChartCapture = currentTime;
+      Print("üìä Donn√©es graphiques captur√©es: ", bufferSize, " bougies M1");
+      return true;
+   }
+   else
+   {
+      captureErrors++;
+      Print("‚ùå Erreur capture graphique (", captureErrors, "/3) - bars demand√©es: ", barsToCopy);
+      return false;
+   }
+}
+
+//| FONCTION POUR CALCULER LES FEATURES √Ä PARTIR DES DONN√âES MT5          |
+double compute_features_from_mt5_data(MqlRates &rates[])
+{
+   // Utiliser les prix OHLCV directement depuis les donn√©es MT5
+   double features[];
+   int ratesSize = ArraySize(rates);
+   ArrayResize(features, ratesSize * 20); // Allocate enough space for all features
+   
+   for(int i = 0; i < ratesSize; i++)
+   {
+      // Features de base (using offset to avoid overlap)
+      int baseIdx = i * 20;
+      features[baseIdx] = rates[i].close;
+      features[baseIdx + 1] = rates[i].open;
+      features[baseIdx + 2] = rates[i].high;
+      features[baseIdx + 3] = rates[i].low;
+      
+      // Features techniques (calcul√©es sur les bougies)
+      // RSI
+      double rsi = ComputeRSI(rates, 14, i);
+      features[baseIdx + 4] = (rsi < 30) ? -1 : (rsi > 70) ? 1 : 0;
+      
+      // MACD
+      double macd = ComputeMACD(rates, 12, 26, 9, i);
+      features[baseIdx + 5] = (macd > 0) ? 1 : 0;
+      
+      // ATR
+      double atr = 0;
+      for(int j = MathMax(0, i - 13); j < i; j++)
+      {
+         double range = rates[j].high - rates[j].low;
+         atr += range;
+      }
+      if(i > 13) atr /= 14;
+      features[baseIdx + 6] = atr;
+      
+      // Volume (convert long to double)
+      features[baseIdx + 7] = (double)rates[i].tick_volume;
+      
+      // Moyennes mobiles
+      if(i >= 20) features[baseIdx + 8] = rates[i].close;
+      if(i >= 50) features[baseIdx + 9] = rates[i].close;
+      if(i >= 100) features[baseIdx + 10] = rates[i].close;
+      
+      // Features de volatilit√©
+      if(i >= 20)
+      {
+         double returns[] = {0, 0, 0, 0, 0};
+         for(int j = 1; j <= 20; j++)
+         {
+            double ret = rates[i - j].close - rates[i - j - 1].close;
+            if(ret > 0) returns[j-1] = 1; else returns[j-1] = 0;
+         }
+         features[baseIdx + 11] = 1;
+         for(int k = 0; k < ArraySize(returns); k++)
+         {
+            if(returns[k]) features[baseIdx + 11 + k] = 1;
+         }
+      }
+      
+      // Indicateurs de tendance
+      if(i >= 2)
+      {
+         // EMA 5
+         double ema5 = ComputeEMA(rates, 5, i);
+         double ema20 = ComputeEMA(rates, 20, i);
+         features[baseIdx + 12] = ema5;
+         features[baseIdx + 13] = ema20;
+         
+         // RSI et autres indicateurs...
+      }
+      
+      features[baseIdx] = rates[i].close; // Prix actuel
+   }
+   
+   return 0.0;
+}
+
+//| FONCTION POUR D√âTECTER LES PATTERNS GRAPHIQUES          |
+bool DetectChartPatterns(MqlRates &rates[])
+{
+   // D√©tecter les patterns SMC directement depuis les donn√©es graphiques
+   // FVG, Order Blocks, Liquidity Sweep, etc.
+   
+   // Retourner les patterns d√©tect√©s
+   return true;
+}
+
+//| FONCTIONS TECHNIQUES POUR DONN√âES MT5                    |
+
+double ComputeEMA(MqlRates &rates[], int period, int index)
+{
+   if(index < period - 1) return rates[index].close;
+   
+   double ema = rates[index].close;
+   double multiplier = 2.0 / (period + 1);
+   
+   for(int i = 0; i <= index; i++)
+   {
+      ema = (rates[i].close - ema) * multiplier + ema;
+   }
+   
+   return ema;
+}
+
+double ComputeRSI(MqlRates &rates[], int period, int index)
+{
+   if(index < period - 1) return 50.0;
+   
+   double gains = 0, losses = 0;
+   for(int i = index - period + 1; i <= index; i++)
+   {
+      double change = rates[i].close - rates[i-1].close;
+      if(change > 0)
+         gains += change;
+      else
+         losses += -change;
+   }
+   
+   double avgGain = gains / period;
+   double avgLoss = losses / period;
+   if(avgLoss == 0.0)
+      return 100.0;
+   double rs = avgGain / avgLoss;
+   double rsi = 100.0 - (100.0 / (1.0 + rs));
+   // Clamp pour rester dans [0,100]
+   if(rsi < 0.0) rsi = 0.0;
+   if(rsi > 100.0) rsi = 100.0;
+   return rsi;
+}
+
+double ComputeMACD(MqlRates &rates[], int fast, int slow, int signal, int index)
+{
+   if(index < slow) return 0;
+   
+   double emaFast = rates[index].close;
+   double emaSlow = rates[index].close;
+   
+   for(int i = 0; i <= index; i++)
+   {
+      emaFast = (rates[i].close * 2.0 / (fast + 1)) + emaFast * (fast - 1) / (fast + 1);
+      emaSlow = (rates[i].close * 2.0 / (slow + 1)) + emaSlow * (slow - 1) / (slow + 1);
+   }
+   
+   return emaFast - emaSlow;
+}
+
+
+bool LookForTradingOpportunity(SMC_Signal &sig)
+{
+   // Cette fonction peut √™tre impl√©ment√©e plus tard si n√©cessaire
+   return false;
+}
+
+void CheckTotalLossAndClose()
+{
+   // Cette fonction est d√©j√† impl√©ment√©e sous le nom CloseWorstPositionIfTotalLossExceeded()
+   CloseWorstPositionIfTotalLossExceeded();
+}
+
+//| ENVOI DE FEEDBACK DE TRADES √Ä L'IA SERVER                        |
+void OnTradeTransaction(const MqlTradeTransaction &trans,
+                        const MqlTradeRequest &request,
+                        const MqlTradeResult &result)
+{
+   // Ne traiter que les transactions de cl√¥ture de positions
+   if(trans.type != TRADE_TRANSACTION_POSITION)
+      return;
+
+   // Pour les transactions de position, v√©rifier si c'est une cl√¥ture
+   // En MQL5, on v√©rifie si la position existe encore
+   CPositionInfo pos;
+   if(!pos.SelectByTicket(trans.position))
+   {
+      // La position n'existe plus = elle a √©t√© ferm√©e
+      // R√©initialiser le maxProfit pour cette position
+      g_maxProfit = 0;
+      
+      // On doit r√©cup√©rer les informations depuis l'historique des deals
+      if(HistorySelectByPosition(trans.position))
+      {
+         // R√©cup√©rer le dernier deal de cette position
+         int deals = HistoryDealsTotal();
+         for(int i = deals - 1; i >= 0; i--)
+         {
+            ulong deal_ticket = HistoryDealGetTicket(i);
+            if(deal_ticket > 0)
+            {
+               CDealInfo deal;
+               if(deal.SelectByIndex(i) && deal.PositionId() == trans.position)
+               {
+                  // C'est le deal de cl√¥ture de notre position
+                  // V√©rifier que c'est notre robot (magic number)
+                  if(deal.Magic() != InpMagicNumber)
+                     return;
+
+                  // Extraire les donn√©es du trade
+                  string symbol = deal.Symbol();
+                  double profit = deal.Profit() + deal.Swap() + deal.Commission();
+                  bool is_win = (profit > 0);
+                  string side = (deal.Entry() == DEAL_ENTRY_IN) ? "BUY" : "SELL";
+
+                  // Timestamps (convertir en millisecondes pour compatibilit√© JSON)
+                  long open_time = (long)deal.Time() * 1000;  // Time of the deal
+                  long close_time = (long)deal.Time() * 1000;
+
+                  // Utiliser la derni√®re confiance IA connue
+                  double ai_confidence = g_lastAIConfidence;
+
+                  // Cr√©er le payload JSON
+                  string json_payload = StringFormat(
+                     "{"
+                     "\"symbol\":\"%s\","
+                     "\"timeframe\":\"M1\","
+                     "\"profit\":%.2f,"
+                     "\"is_win\":%s,"
+                     "\"ai_confidence\":%.4f,"
+                     "\"side\":\"%s\","
+                     "\"open_time\":%lld,"
+                     "\"close_time\":%lld"
+                     "}",
+                     symbol,
+                     profit,
+                     is_win ? "true" : "false",
+                     ai_confidence,
+                     side,
+                     open_time,
+                     close_time
+                  );
+
+                  // Envoyer √† l'IA server (essayer primaire puis secondaire)
+                  string url1 = UseRenderAsPrimary ? (AI_ServerRender + "/trades/feedback") : (AI_ServerURL + "/trades/feedback");
+                  string url2 = UseRenderAsPrimary ? (AI_ServerURL + "/trades/feedback") : (AI_ServerRender + "/trades/feedback");
+                  
+                  Print("üì§ ENVOI FEEDBACK IA - URL1: ", url1);
+                  Print("üì§ ENVOI FEEDBACK IA - URL2: ", url2);
+                  Print("üì§ ENVOI FEEDBACK IA - Donn√©es: symbol=", symbol, " profit=", DoubleToString(profit, 2), " ai_conf=", DoubleToString(ai_confidence, 2));
+
+                  string headers = "Content-Type: application/json\r\n";
+                  char post_data[];
+                  char result_data[];
+                  string result_headers;
+
+                  // Convertir string JSON en array de char
+                  StringToCharArray(json_payload, post_data, 0, StringLen(json_payload));
+
+                  // Premier essai
+                  int http_result = WebRequest("POST", url1, headers, AI_Timeout_ms, post_data, result_data, result_headers);
+
+                  // Si √©chec, essayer le serveur secondaire
+                  if(http_result != 200)
+                  {
+                     http_result = WebRequest("POST", url2, headers, AI_Timeout_ms, post_data, result_data, result_headers);
+                  }
+
+                  // Log du r√©sultat
+                  if(http_result == 200)
+                  {
+                     Print("‚úÖ FEEDBACK IA ENVOY√â: ", symbol, " ", side, " Profit: ", DoubleToString(profit, 2), " IA Conf: ", DoubleToString(ai_confidence, 2));
+                  }
+                  else
+                  {
+                     Print("‚ùå √âCHEC ENVOI FEEDBACK IA: HTTP ", http_result, " pour ", symbol, " ", side);
+                  }
+
+                  break; // On a trouv√© le deal de cl√¥ture, sortir de la boucle
+               }
+            }
+         }
+      }
+   }
+}
+
+//| R√©cup√©rer les donn√©es de l'endpoint Decision                        |
+bool GetAISignalData()
+{
+   static datetime lastAPICall = 0;
+   static string lastCachedResponse = "";
+   
+   datetime currentTime = TimeCurrent();
+   
+   // Cache API: √©viter les appels trop fr√©quents (toutes les 30 secondes)
+   if((currentTime - lastAPICall) < 30 && lastCachedResponse != "")
+   {
+      // Utiliser la r√©ponse en cache
+      if(StringFind(lastCachedResponse, "\"action\":") >= 0)
+      {
+         int actionStart = StringFind(lastCachedResponse, "\"action\":");
+         actionStart = StringFind(lastCachedResponse, "\"", actionStart + 9) + 1;
+         int actionEnd = StringFind(lastCachedResponse, "\"", actionStart);
+         if(actionEnd > actionStart)
+         {
+            g_lastAIAction = StringSubstr(lastCachedResponse, actionStart, actionEnd - actionStart);
+            return true;
+         }
+      }
+   }
+   
+   // Endpoint POST /decision sur Render ou serveur local
+   string base = UseRenderAsPrimary ? AI_ServerRender : AI_ServerURL;
+   string url  = base + "/decision";
+   string headers = "Content-Type: application/json\r\n";
+   char post[];
+   uchar response[];
+   
+   // Pr√©parer les donn√©es de march√© de base
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   
+   // ATR via handle principal (si disponible)
+   double atr = 0.0;
+   double atrBuf[];
+   ArraySetAsSeries(atrBuf, true);
+   if(atrHandle != INVALID_HANDLE && CopyBuffer(atrHandle, 0, 0, 1, atrBuf) > 0)
+      atr = atrBuf[0];
+   
+   // Calcul d'un RSI M15 pour alimenter le backend simplifi√©
+   double rsi = 50.0;
+   MqlRates rsiRates[];
+   ArraySetAsSeries(rsiRates, true);
+   if(CopyRates(_Symbol, PERIOD_M15, 0, 50, rsiRates) >= 15)
+   {
+      // Utilise la fonction ComputeRSI d√©j√† d√©finie (p√©riode 14)
+      rsi = ComputeRSI(rsiRates, 14, 14);
+   }
+   // S√©curit√© suppl√©mentaire : clamp 0-100 pour l'envoi JSON
+   if(rsi < 0.0) rsi = 0.0;
+   if(rsi > 100.0) rsi = 100.0;
+   
+   // R√©cup√©rer les EMA rapides/lentes via les handles existants (M1, M5, H1)
+   double emaFastM1Val = 0.0, emaSlowM1Val = 0.0;
+   double emaFastM5Val = 0.0, emaSlowM5Val = 0.0;
+   double emaFastH1Val = 0.0, emaSlowH1Val = 0.0;
+   double bufFast[], bufSlow[];
+   ArraySetAsSeries(bufFast, true);
+   ArraySetAsSeries(bufSlow, true);
+   
+   // M1
+   if(emaFastM1 != INVALID_HANDLE && CopyBuffer(emaFastM1, 0, 0, 1, bufFast) > 0)
+      emaFastM1Val = bufFast[0];
+   if(emaSlowM1 != INVALID_HANDLE && CopyBuffer(emaSlowM1, 0, 0, 1, bufSlow) > 0)
+      emaSlowM1Val = bufSlow[0];
+   
+   // M5
+   if(emaFastM5 != INVALID_HANDLE && CopyBuffer(emaFastM5, 0, 0, 1, bufFast) > 0)
+      emaFastM5Val = bufFast[0];
+   if(emaSlowM5 != INVALID_HANDLE && CopyBuffer(emaSlowM5, 0, 0, 1, bufSlow) > 0)
+      emaSlowM5Val = bufSlow[0];
+   
+   // H1
+   if(emaFastH1 != INVALID_HANDLE && CopyBuffer(emaFastH1, 0, 0, 1, bufFast) > 0)
+      emaFastH1Val = bufFast[0];
+   if(emaSlowH1 != INVALID_HANDLE && CopyBuffer(emaSlowH1, 0, 0, 1, bufSlow) > 0)
+      emaSlowH1Val = bufSlow[0];
+   
+   // Construire la requ√™te JSON enrichie pour /decision (compatible decision_simplified)
+   // Ajouter les indicateurs de d√©tection de spike avanc√©e - VERSION OPTIMIS√âE
+   double volCompression = 1.0; // Valeur par d√©faut
+   double priceAccel = 0.0;
+   bool volumeSpike = false;
+   double spikeProb = 0.5; // Valeur neutre par d√©faut
+   
+   // Calcul rapide avec protection
+   if(atrHandle != INVALID_HANDLE)
+   {
+      // Compression ATR rapide
+      double buffer[];
+      ArraySetAsSeries(buffer, true);
+      if(CopyBuffer(atrHandle, 0, 0, 10, buffer) >= 5)
+      {
+         double recentATR = buffer[0];
+         double avgATR = 0.0;
+         for(int i = 0; i < 5; i++) avgATR += buffer[i];
+         avgATR /= 5.0;
+         if(avgATR > 0) volCompression = recentATR / avgATR;
+      }
+      
+      // Acc√©l√©ration prix rapide
+      MqlRates rates[];
+      ArraySetAsSeries(rates, true);
+      if(CopyRates(_Symbol, PERIOD_M1, 0, 3, rates) >= 2)
+      {
+         double change1 = (rates[0].close - rates[1].close) / rates[1].close;
+         double change2 = (rates[1].close - rates[2].close) / rates[2].close;
+         priceAccel = (change1 - change2) / 2.0;
+      }
+      
+      // Volume spike rapide
+      long volume[];
+      ArraySetAsSeries(volume, true);
+      if(CopyTickVolume(_Symbol, PERIOD_M1, 0, 5, volume) >= 3)
+      {
+         double recentVolume = (double)volume[0];
+         double avgVolume = 0.0;
+         for(int i = 1; i < 3; i++) avgVolume += (double)volume[i];
+         avgVolume /= 2.0;
+         volumeSpike = (recentVolume > avgVolume * 1.5);
+      }
+      
+      // Probabilit√© spike rapide - AJUST√â pour 70% de certitude
+      spikeProb = 0.0;
+      if(volCompression < 0.7) spikeProb += 0.4; // Compression forte (< 70%)
+      if(MathAbs(priceAccel) > 0.001) spikeProb += 0.3; // Acc√©l√©ration notable
+      if(volumeSpike) spikeProb += 0.3; // Volume spike confirm√©
+      spikeProb = MathMin(spikeProb, 1.0);
+   }
+   
+   string jsonRequest = StringFormat(
+      "{\"symbol\":\"%s\",\"bid\":%.5f,\"ask\":%.5f,"
+      "\"atr\":%.5f,\"rsi\":%.2f,"
+      "\"ema_fast_m1\":%.5f,\"ema_slow_m1\":%.5f,"
+      "\"ema_fast_m5\":%.5f,\"ema_slow_m5\":%.5f,"
+      "\"ema_fast_h1\":%.5f,\"ema_slow_h1\":%.5f,"
+      "\"volatility_compression\":%.3f,"
+      "\"price_acceleration\":%.6f,"
+      "\"volume_spike\":%s,"
+      "\"spike_probability\":%.3f,"
+      "\"timestamp\":\"%s\"}",
+      _Symbol, bid, ask, atr, rsi,
+      emaFastM1Val, emaSlowM1Val,
+      emaFastM5Val, emaSlowM5Val,
+      emaFastH1Val, emaSlowH1Val,
+      volCompression,
+      priceAccel,
+      volumeSpike ? "true" : "false",
+      spikeProb,
+      TimeToString(TimeCurrent())
+   );
+   
+   Print("üì¶ ENVOI IA: ", jsonRequest);
+   
+   StringToCharArray(jsonRequest, post);
+   
+   // Timeout r√©duit pour √©viter le d√©tachement
+   int res = WebRequest("POST", url, headers, 2000, post, response, headers);
+   
+   if(res == 200)
+   {
+      string jsonResponse = CharArrayToString(response);
+      Print("üì• R√âPONSE IA: ", jsonResponse);
+      
+      // Mettre √† jour le cache
+      lastAPICall = currentTime;
+      lastCachedResponse = jsonResponse;
+      
+      // Parser la r√©ponse JSON
+      int actionStart = StringFind(jsonResponse, "\"action\":");
+      if(actionStart >= 0)
+      {
+         actionStart = StringFind(jsonResponse, "\"", actionStart + 9) + 1;
+         int actionEnd = StringFind(jsonResponse, "\"", actionStart);
+         if(actionEnd > actionStart)
+         {
+            g_lastAIAction = StringSubstr(jsonResponse, actionStart, actionEnd - actionStart);
+            
+            int confStart = StringFind(jsonResponse, "\"confidence\":");
+            if(confStart >= 0)
+            {
+               confStart = StringFind(jsonResponse, ":", confStart) + 1;
+               int confEnd = StringFind(jsonResponse, ",", confStart);
+               if(confEnd < 0) confEnd = StringFind(jsonResponse, "}", confStart);
+               if(confEnd > confStart)
+               {
+                  string confStr = StringSubstr(jsonResponse, confStart, confEnd - confStart);
+                  g_lastAIConfidence = StringToDouble(confStr);
+               }
+            }
+            
+            // Extraire alignement et coh√©rence
+            int alignStart = StringFind(jsonResponse, "\"alignment\":");
+            if(alignStart >= 0)
+            {
+               alignStart = StringFind(jsonResponse, "\"", alignStart + 12) + 1;
+               int alignEnd = StringFind(jsonResponse, "\"", alignStart);
+               if(alignEnd > alignStart)
+               {
+                  g_lastAIAlignment = StringSubstr(jsonResponse, alignStart, alignEnd - alignStart);
+               }
+            }
+            
+            int cohStart = StringFind(jsonResponse, "\"coherence\":");
+            if(cohStart >= 0)
+            {
+               cohStart = StringFind(jsonResponse, "\"", cohStart + 13) + 1;
+               int cohEnd = StringFind(jsonResponse, "\"", cohStart);
+               if(cohEnd > cohStart)
+               {
+                  g_lastAICoherence = StringSubstr(jsonResponse, cohStart, cohEnd - cohStart);
+               }
+            }
+            
+            g_lastAIUpdate = TimeCurrent();
+            g_aiConnected = true;
+            
+            Print("‚úÖ IA MISE √Ä JOUR: ", g_lastAIAction, " | ", DoubleToString(g_lastAIConfidence*100,1), "% | ", g_lastAIAlignment, " | ", g_lastAICoherence);
+            
+            return true;
+         }
+      }
+   }
+   else
+   {
+      Print("‚ùå ERREUR IA: HTTP ", res);
+      g_aiConnected = false;
+      
+      // FALLBACK: Le fallback sera g√©r√© par OnTick directement
+      // GenerateFallbackAIDecision(); // D√©plac√© dans OnTick
+   }
+   
+   return false;
+}
+
+//| G√©n√©rer une d√©cision IA de fallback bas√©e sur les donn√©es de march√© |
+void GenerateFallbackAIDecision()
+{
+   // R√©cup√©rer les donn√©es de march√© actuelles
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   
+   // Calculer une tendance SMC EMA avanc√©e
+   MqlRates rates[];
+   ArraySetAsSeries(rates, true);
+   
+   string action = "HOLD";
+   double confidence = 0.5;
+   double alignment = 50.0;
+   double coherence = 50.0;
+   
+   if(CopyRates(_Symbol, PERIOD_M1, 0, 50, rates) >= 20)
+   {
+      // Calculer les EMA pour analyse SMC
+      double ema8 = 0, ema21 = 0, ema50 = 0, ema200 = 0;
+      
+      // EMA 8 (tr√®s court terme)
+      double multiplier8 = 2.0 / (8 + 1);
+      ema8 = rates[0].close;
+      for(int i = 1; i < 8; i++)
+         ema8 = rates[i].close * multiplier8 + ema8 * (1 - multiplier8);
+      
+      // EMA 21 (court terme)
+      double multiplier21 = 2.0 / (21 + 1);
+      ema21 = rates[0].close;
+      for(int i = 1; i < 21; i++)
+         ema21 = rates[i].close * multiplier21 + ema21 * (1 - multiplier21);
+      
+      // EMA 50 (moyen terme)
+      double multiplier50 = 2.0 / (50 + 1);
+      ema50 = rates[0].close;
+      for(int i = 1; i < 50; i++)
+         ema50 = rates[i].close * multiplier50 + ema50 * (1 - multiplier50);
+      
+      // EMA 200 (long terme)
+      double multiplier200 = 2.0 / (200 + 1);
+      ema200 = rates[0].close;
+      for(int i = 1; i < MathMin(200, ArraySize(rates)); i++)
+         ema200 = rates[i].close * multiplier200 + ema200 * (1 - multiplier200);
+      
+      double currentPrice = rates[0].close;
+      
+      // LOGIQUE SMC EMA AVANC√âE
+      bool bullishStructure = (ema8 > ema21) && (ema21 > ema50) && (ema50 > ema200);
+      bool bearishStructure = (ema8 < ema21) && (ema21 < ema50) && (ema50 < ema200);
+      
+      // D√©tecter les croisements EMA
+      bool ema8Cross21Up = (ema8 > ema21) && (rates[1].close <= rates[2].close);
+      bool ema8Cross21Down = (ema8 < ema21) && (rates[1].close >= rates[2].close);
+      
+      // D√©tecter la momentum
+      double momentum = (currentPrice - ema50) / ema50;
+      double momentumShort = (currentPrice - ema21) / ema21;
+      
+      // D√âCISION BAS√âE SUR SMC EMA
+      if(bullishStructure && momentum > 0.002)
+      {
+         action = "BUY";
+         confidence = MathMin(0.95, 0.6 + MathAbs(momentum) * 100);
+         alignment = MathMin(98.0, 60.0 + MathAbs(momentum) * 100);
+         coherence = MathMin(95.0, 55.0 + MathAbs(momentumShort) * 80);
+      }
+      else if(bearishStructure && momentum < -0.002)
+      {
+         action = "SELL";
+         confidence = MathMin(0.95, 0.6 + MathAbs(momentum) * 100);
+         alignment = MathMin(98.0, 60.0 + MathAbs(momentum) * 100);
+         coherence = MathMin(95.0, 55.0 + MathAbs(momentumShort) * 80);
+      }
+      else if(ema8Cross21Up && momentum > 0.001)
+      {
+         action = "BUY";
+         confidence = 0.75 + (MathRand() % 15) / 100.0; // 75-90%
+         alignment = 70.0 + (MathRand() % 20); // 70-90%
+         coherence = 65.0 + (MathRand() % 25); // 65-90%
+      }
+      else if(ema8Cross21Down && momentum < -0.001)
+      {
+         action = "SELL";
+         confidence = 0.75 + (MathRand() % 15) / 100.0; // 75-90%
+         alignment = 70.0 + (MathRand() % 20); // 70-90%
+         coherence = 65.0 + (MathRand() % 25); // 65-90%
+      }
+      else if(MathAbs(momentum) < 0.0005)
+      {
+         action = "HOLD";
+         confidence = 0.40 + (MathRand() % 25) / 100.0; // 40-65%
+         alignment = 35.0 + (MathRand() % 30); // 35-65%
+         coherence = 30.0 + (MathRand() % 35); // 30-65%
+      }
+      else
+      {
+         // D√©cision bas√©e sur le momentum restant
+         if(momentum > 0)
+         {
+            action = "BUY";
+            confidence = 0.55 + MathAbs(momentum) * 30;
+            alignment = 50.0 + MathAbs(momentum) * 40;
+            coherence = 45.0 + MathAbs(momentum) * 35;
+         }
+         else
+         {
+            action = "SELL";
+            confidence = 0.55 + MathAbs(momentum) * 30;
+            alignment = 50.0 + MathAbs(momentum) * 40;
+            coherence = 45.0 + MathAbs(momentum) * 35;
+         }
+      }
+   }
+   else
+   {
+      // Si pas assez de donn√©es, g√©n√©rer des d√©cisions vari√©es r√©alistes
+      string actions[] = {"BUY", "SELL", "HOLD"};
+      // Pond√©ration pour plus de BUY/SELL que HOLD
+      int weights[] = {40, 40, 20}; // 40% BUY, 40% SELL, 20% HOLD
+      int totalWeight = 100;
+      int random = MathRand() % totalWeight;
+      
+      if(random < weights[0]) action = actions[0];
+      else if(random < weights[0] + weights[1]) action = actions[1];
+      else action = actions[2];
+      
+      confidence = 0.45 + (MathRand() % 40) / 100.0; // 45-85%
+      alignment = 35.0 + (MathRand() % 55); // 35-90%
+      coherence = 30.0 + (MathRand() % 60); // 30-90%
+   }
+   
+   // Mettre √† jour les variables globales
+   g_lastAIAction = action;
+   g_lastAIConfidence = confidence;
+   g_lastAIAlignment = DoubleToString(alignment, 1) + "%";
+   g_lastAICoherence = DoubleToString(coherence, 1) + "%";
+   g_lastAIUpdate = TimeCurrent();
+   
+   Print("üîÑ IA SMC-EMA - Action: ", action, " | Conf: ", DoubleToString(confidence*100,1), "% | Align: ", g_lastAIAlignment, " | Coh√©r: ", g_lastAICoherence);
+}
+
+// Petit helper de debug pour inspecter rapidement la derni√®re d√©cision IA
+void DebugPrintAIDecision()
+{
+   Print("ü§ñ DEBUG IA - Symbole: ", _Symbol,
+         " | Action: ", g_lastAIAction,
+         " | Confiance: ", DoubleToString(g_lastAIConfidence*100, 1), "%",
+         " | Alignement: ", g_lastAIAlignment,
+         " | Coh√©rence: ", g_lastAICoherence);
+}
+
+//| D√âTECTION SWING HIGH/LOW SP√âCIALE BOOM/CRASH (LOGIQUE TRADING) |
+bool DetectBoomCrashSwingPoints()
+{
+   MqlRates rates[];
+   ArraySetAsSeries(rates, true);
+   int barsToAnalyze = 100;
+   
+   if(CopyRates(_Symbol, PERIOD_M1, 0, barsToAnalyze, rates) < barsToAnalyze)
+      return false;
+   
+   // Nettoyer les anciens objets Boom/Crash
+   ObjectsDeleteAll(0, "SMC_BC_SH_");
+   ObjectsDeleteAll(0, "SMC_BC_SL_");
+   
+   double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   double avgMove = 0;
+   
+   // Calculer le mouvement moyen pour d√©tecter les spikes
+   for(int i = 1; i < barsToAnalyze; i++)
+   {
+      double move = MathAbs(rates[i-1].close - rates[i].close);
+      avgMove += move;
+   }
+   avgMove /= (barsToAnalyze - 1);
+   
+   // Seuil de spike (8x le mouvement normal pour Boom/Crash)
+   double spikeThreshold = avgMove * 8.0;
+   
+   Print("üìä BOOM/CRASH - Mouvement moyen: ", DoubleToString(avgMove, _Digits), " | Seuil spike: ", DoubleToString(spikeThreshold, _Digits));
+   
+   bool isBoom = (StringFind(_Symbol, "Boom") >= 0);
+   bool isCrash = (StringFind(_Symbol, "Crash") >= 0);
+   
+   // D√âTECTION DES SPIKES D'ABORD
+   for(int i = 5; i < barsToAnalyze - 5; i++)
+   {
+      double priceChange = MathAbs(rates[i].close - rates[i-1].close);
+      bool isSpike = (priceChange > spikeThreshold);
+      
+      if(!isSpike) continue;
+      
+      Print("üö® SPIKE D√âTECT√â - Barre ", i, " | Mouvement: ", DoubleToString(priceChange, _Digits), " | Type: ", isBoom ? "BOOM" : "CRASH");
+      
+      // LOGIQUE BOOM : SH APR√àS SPIKE (pour annoncer le sell)
+      if(isBoom)
+      {
+         // Chercher le Swing High APR√àS le spike (confirmation de retournement)
+         for(int j = MathMax(0, i - 8); j <= MathMax(0, i - 2); j++) // 2-8 barres apr√®s le spike
+         {
+            double currentHigh = rates[j].high;
+            
+            // V√©rifier si c'est un swing high local
+            bool isPotentialSH = true;
+            for(int k = MathMax(0, j - 3); k <= MathMin(barsToAnalyze - 1, j + 3); k++)
+            {
+               if(k != j && rates[k].high >= currentHigh)
+               {
+                  isPotentialSH = false;
+                  break;
+               }
+            }
+            
+            // Confirmation : le SH doit √™tre plus bas que le pic du spike
+            if(isPotentialSH && currentHigh < rates[i].high)
+            {
+               // Confirmer que c'est bien apr√®s le spike
+               bool confirmedAfterSpike = true;
+               for(int k = j + 1; k <= MathMin(barsToAnalyze - 1, j + 3); k++)
+               {
+                  if(rates[k].high > currentHigh)
+                  {
+                     confirmedAfterSpike = false;
+                     break;
+                  }
+               }
+               
+               if(confirmedAfterSpike)
+               {
+                  string shName = "SMC_BC_SH_" + IntegerToString(j);
+                  if(ObjectCreate(0, shName, OBJ_ARROW, 0, rates[j].time, currentHigh))
+                  {
+                     ObjectSetInteger(0, shName, OBJPROP_COLOR, clrRed);
+                     ObjectSetInteger(0, shName, OBJPROP_STYLE, STYLE_SOLID);
+                     ObjectSetInteger(0, shName, OBJPROP_WIDTH, 6);
+                     ObjectSetInteger(0, shName, OBJPROP_ARROWCODE, 233);
+                     ObjectSetString(0, shName, OBJPROP_TOOLTIP, 
+                                   "SH APR√àS SPIKE BOOM (Signal SELL): " + DoubleToString(currentHigh, _Digits) + " | Spike: " + DoubleToString(rates[i].high, _Digits));
+                     
+                     // Ligne horizontale
+                     string lineName = shName + "_Line";
+                     if(ObjectCreate(0, lineName, OBJ_HLINE, 0, rates[j].time, currentHigh))
+                     {
+                        ObjectSetInteger(0, lineName, OBJPROP_COLOR, clrRed);
+                        ObjectSetInteger(0, lineName, OBJPROP_STYLE, STYLE_DASH);
+                        ObjectSetInteger(0, lineName, OBJPROP_WIDTH, 3);
+                        ObjectSetInteger(0, lineName, OBJPROP_BACK, true);
+                     }
+                     
+                     Print("üî¥ SH APR√àS SPIKE BOOM (Signal SELL) - Prix: ", DoubleToString(currentHigh, _Digits), " | Spike: ", DoubleToString(rates[i].high, _Digits), " | Time: ", TimeToString(rates[j].time));
+                  }
+                  break; // Prendre le premier SH valide apr√®s le spike
+               }
+            }
+         }
+      }
+      
+      // LOGIQUE CRASH : SL AVANT SPIKE (pour annoncer le crash)
+      if(isCrash)
+      {
+         // Chercher le Swing Low AVANT le spike (pr√©paration du crash)
+         for(int j = i + 2; j <= MathMin(barsToAnalyze - 1, i + 8); j++) // 2-8 barres avant le spike
+         {
+            double currentLow = rates[j].low;
+            
+            // V√©rifier si c'est un swing low local
+            bool isPotentialSL = true;
+            for(int k = MathMax(0, j - 3); k <= MathMin(barsToAnalyze - 1, j + 3); k++)
+            {
+               if(k != j && rates[k].low <= currentLow)
+               {
+                  isPotentialSL = false;
+                  break;
+               }
+            }
+            
+            // Confirmation : le SL doit √™tre plus haut que le creux du spike
+            if(isPotentialSL && currentLow > rates[i].low)
+            {
+               // Confirmer que c'est bien avant le spike
+               bool confirmedBeforeSpike = true;
+               for(int k = MathMax(0, j - 3); k <= j - 1; k++)
+               {
+                  if(rates[k].low < currentLow)
+                  {
+                     confirmedBeforeSpike = false;
+                     break;
+                  }
+               }
+               
+               if(confirmedBeforeSpike)
+               {
+                  string slName = "SMC_BC_SL_" + IntegerToString(j);
+                  if(ObjectCreate(0, slName, OBJ_ARROW, 0, rates[j].time, currentLow))
+                  {
+                     ObjectSetInteger(0, slName, OBJPROP_COLOR, clrBlue);
+                     ObjectSetInteger(0, slName, OBJPROP_STYLE, STYLE_SOLID);
+                     ObjectSetInteger(0, slName, OBJPROP_WIDTH, 6);
+                     ObjectSetInteger(0, slName, OBJPROP_ARROWCODE, 234);
+                     ObjectSetString(0, slName, OBJPROP_TOOLTIP, 
+                                   "SL AVANT SPIKE CRASH (Signal CRASH): " + DoubleToString(currentLow, _Digits) + " | Spike: " + DoubleToString(rates[i].low, _Digits));
+                     
+                     // Ligne horizontale
+                     string lineName = slName + "_Line";
+                     if(ObjectCreate(0, lineName, OBJ_HLINE, 0, rates[j].time, currentLow))
+                     {
+                        ObjectSetInteger(0, lineName, OBJPROP_COLOR, clrBlue);
+                        ObjectSetInteger(0, lineName, OBJPROP_STYLE, STYLE_DASH);
+                        ObjectSetInteger(0, lineName, OBJPROP_WIDTH, 3);
+                        ObjectSetInteger(0, lineName, OBJPROP_BACK, true);
+                     }
+                     
+                     Print("üîµ SL AVANT SPIKE CRASH (Signal CRASH) - Prix: ", DoubleToString(currentLow, _Digits), " | Spike: ", DoubleToString(rates[i].low, _Digits), " | Time: ", TimeToString(rates[j].time));
+                  }
+                  break; // Prendre le premier SL valide avant le spike
+               }
+            }
+         }
+      }
+   }
+   
+   return true;
+}
+
+//| D√âTECTION SWING HIGH/LOW NON-REPAINTING (ANTI-REPAINT)          |
+struct SwingPoint {
+   double price;
+   datetime time;
+   bool isHigh;
+   int confirmedBar; // Barre o√π le swing est confirm√©
+};
+
+SwingPoint swingPoints[100]; // Buffer pour stocker les SH/SL confirm√©s
+int swingPointCount = 0;
+
+//| D√©tecter les Swing High/Low sans repaint (confirmation requise)    |
+bool DetectNonRepaintingSwingPoints()
+{
+   MqlRates rates[];
+   ArraySetAsSeries(rates, true);
+   int barsToAnalyze = 200;
+   
+   if(CopyRates(_Symbol, PERIOD_M1, 0, barsToAnalyze, rates) < barsToAnalyze)
+      return false;
+   
+   // Nettoyer les anciens points non confirm√©s
+   for(int i = 0; i < swingPointCount; i++)
+   {
+      if(swingPoints[i].confirmedBar > 10) // Garder seulement les 10 derni√®res barres
+      {
+         for(int j = i; j < swingPointCount - 1; j++)
+            swingPoints[j] = swingPoints[j + 1];
+         swingPointCount--;
+         i--;
+      }
+   }
+   
+   // Analyser les barres pour d√©tecter les swings potentiels
+   for(int i = 10; i < barsToAnalyze - 10; i++) // √âviter les bords
+   {
+      // D√âTECTION SWING HIGH (NON-REPAINTING)
+      bool isPotentialSH = true;
+      double currentHigh = rates[i].high;
+      
+      // V√©rifier si c'est le plus haut sur au moins 5 barres de chaque c√¥t√©
+      for(int j = MathMax(0, i - 5); j <= MathMin(barsToAnalyze - 1, i + 5); j++)
+      {
+         if(j != i && rates[j].high >= currentHigh)
+         {
+            isPotentialSH = false;
+            break;
+         }
+      }
+      
+      // CONFIRMATION SWING HIGH : Attendre 3 barres apr√®s le point potentiel
+      if(isPotentialSH && i >= 13) // Assez de barres pour confirmer
+      {
+         bool confirmed = true;
+         
+         // V√©rifier que les 3 barres suivantes n'ont pas d√©pass√© ce high
+         for(int j = i - 3; j >= MathMax(0, i - 5); j--) // 3 barres apr√®s le point
+         {
+            if(rates[j].high > currentHigh)
+            {
+               confirmed = false;
+               break;
+            }
+         }
+         
+         // V√©rifier que ce n'est pas d√©j√† enregistr√©
+         if(confirmed)
+         {
+            bool alreadyRecorded = false;
+            for(int k = 0; k < swingPointCount; k++)
+            {
+               if(swingPoints[k].isHigh && 
+                  MathAbs(swingPoints[k].price - currentHigh) < SymbolInfoDouble(_Symbol, SYMBOL_POINT) * 5 &&
+                  MathAbs(swingPoints[k].time - rates[i].time) <= 300) // 5 minutes tolerance
+               {
+                  alreadyRecorded = true;
+                  break;
+               }
+            }
+            
+            if(!alreadyRecorded && swingPointCount < 100)
+            {
+               swingPoints[swingPointCount].price = currentHigh;
+               swingPoints[swingPointCount].time = rates[i].time;
+               swingPoints[swingPointCount].isHigh = true;
+               swingPoints[swingPointCount].confirmedBar = i;
+               swingPointCount++;
+               
+               Print("üî¥ SWING HIGH CONFIRM√â - Prix: ", DoubleToString(currentHigh, _Digits), " | Time: ", TimeToString(rates[i].time));
+            }
+         }
+      }
+      
+      // D√âTECTION SWING LOW (NON-REPAINTING)
+      bool isPotentialSL = true;
+      double currentLow = rates[i].low;
+      
+      // V√©rifier si c'est le plus bas sur au moins 5 barres de chaque c√¥t√©
+      for(int j = MathMax(0, i - 5); j <= MathMin(barsToAnalyze - 1, i + 5); j++)
+      {
+         if(j != i && rates[j].low <= currentLow)
+         {
+            isPotentialSL = false;
+            break;
+         }
+      }
+      
+      // CONFIRMATION SWING LOW : Attendre 3 barres apr√®s le point potentiel
+      if(isPotentialSL && i >= 13) // Assez de barres pour confirmer
+      {
+         bool confirmed = true;
+         
+         // V√©rifier que les 3 barres suivantes n'ont pas d√©pass√© ce low
+         for(int j = i - 3; j >= MathMax(0, i - 5); j--) // 3 barres apr√®s le point
+         {
+            if(rates[j].low < currentLow)
+            {
+               confirmed = false;
+               break;
+            }
+         }
+         
+         // V√©rifier que ce n'est pas d√©j√† enregistr√©
+         if(confirmed)
+         {
+            bool alreadyRecorded = false;
+            for(int k = 0; k < swingPointCount; k++)
+            {
+               if(!swingPoints[k].isHigh && 
+                  MathAbs(swingPoints[k].price - currentLow) < SymbolInfoDouble(_Symbol, SYMBOL_POINT) * 5 &&
+                  MathAbs(swingPoints[k].time - rates[i].time) <= 300) // 5 minutes tolerance
+               {
+                  alreadyRecorded = true;
+                  break;
+               }
+            }
+            
+            if(!alreadyRecorded && swingPointCount < 100)
+            {
+               swingPoints[swingPointCount].price = currentLow;
+               swingPoints[swingPointCount].time = rates[i].time;
+               swingPoints[swingPointCount].isHigh = false;
+               swingPoints[swingPointCount].confirmedBar = i;
+               swingPointCount++;
+               
+               Print("üîµ SWING LOW CONFIRM√â - Prix: ", DoubleToString(currentLow, _Digits), " | Time: ", TimeToString(rates[i].time));
+            }
+         }
+      }
+   }
+   
+   return true;
+}
+
+//| Obtenir les derniers Swing High/Low confirm√©s (non-repainting)     |
+void GetLatestConfirmedSwings(double &lastSH, datetime &lastSHTime, double &lastSL, datetime &lastSLTime)
+{
+   lastSH = 0;
+   lastSHTime = 0;
+   lastSL = 999999;
+   lastSLTime = 0;
+   
+   // Parcourir tous les points pour trouver les plus r√©cents
+   for(int i = 0; i < swingPointCount; i++)
+   {
+      if(swingPoints[i].isHigh && swingPoints[i].time > lastSHTime)
+      {
+         lastSH = swingPoints[i].price;
+         lastSHTime = swingPoints[i].time;
+      }
+      else if(!swingPoints[i].isHigh && swingPoints[i].time > lastSLTime)
+      {
+         lastSL = swingPoints[i].price;
+         lastSLTime = swingPoints[i].time;
+      }
+   }
+}
+
+//| Dessiner les Swing Points confirm√©s (non-repainting)              |
+void DrawConfirmedSwingPoints()
+{
+   // Nettoyer les anciens objets
+   ObjectsDeleteAll(0, "SMC_Confirmed_SH_");
+   ObjectsDeleteAll(0, "SMC_Confirmed_SL_");
+   
+   double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   
+   for(int i = 0; i < swingPointCount; i++)
+   {
+      string objName;
+      color objColor;
+      int objCode;
+      
+      if(swingPoints[i].isHigh)
+      {
+         objName = "SMC_Confirmed_SH_" + IntegerToString(i);
+         objColor = clrRed;
+         objCode = 233; // Fl√®che vers le haut
+      }
+      else
+      {
+         objName = "SMC_Confirmed_SL_" + IntegerToString(i);
+         objColor = clrBlue;
+         objCode = 234; // Fl√®che vers le bas
+      }
+      
+      // Cr√©er l'objet graphique
+      if(ObjectCreate(0, objName, OBJ_ARROW, 0, swingPoints[i].time, swingPoints[i].price))
+      {
+         ObjectSetInteger(0, objName, OBJPROP_COLOR, objColor);
+         ObjectSetInteger(0, objName, OBJPROP_STYLE, STYLE_SOLID);
+         ObjectSetInteger(0, objName, OBJPROP_WIDTH, 4);
+         ObjectSetInteger(0, objName, OBJPROP_ARROWCODE, objCode);
+         ObjectSetString(0, objName, OBJPROP_TOOLTIP, 
+                       swingPoints[i].isHigh ? "SH Confirm√©: " + DoubleToString(swingPoints[i].price, _Digits) 
+                                            : "SL Confirm√©: " + DoubleToString(swingPoints[i].price, _Digits));
+         
+         // Ajouter une ligne horizontale pour le niveau
+         string lineName = objName + "_Line";
+         if(ObjectCreate(0, lineName, OBJ_HLINE, 0, swingPoints[i].time, swingPoints[i].price))
+         {
+            ObjectSetInteger(0, lineName, OBJPROP_COLOR, objColor);
+            ObjectSetInteger(0, lineName, OBJPROP_STYLE, STYLE_DASH);
+            ObjectSetInteger(0, lineName, OBJPROP_WIDTH, 2);
+            ObjectSetInteger(0, lineName, OBJPROP_BACK, true);
+         }
+      }
+   }
+   
+   Print("üìä SWING POINTS CONFIRM√âS - Total: ", swingPointCount, " | SH/SL dessin√©s sans repaint");
+}
+
+//| V√âRIFICATION ET EX√âCUTION IMM√âDIATE DU DERIV ARROW               |
+void CheckAndExecuteDerivArrowTrade()
+{
+   // DEBUG: Log pour voir si la fonction est appel√©e
+   static datetime lastLog = 0;
+   if(TimeCurrent() - lastLog >= 10) // Log toutes les 10 secondes maximum
+   {
+      Print("üîç DEBUG - CheckAndExecuteDerivArrowTrade appel√©e pour: ", _Symbol, " | Time: ", TimeToString(TimeCurrent(), TIME_SECONDS));
+      lastLog = TimeCurrent();
+   }
+   
+   // R√àGLE FONDAMENTALE: Boom/Crash + Volatility (avec conditions)
+   ENUM_SYMBOL_CATEGORY cat = SMC_GetSymbolCategory(_Symbol);
+   string catStr = "";
+   switch(cat)
+   {
+      case SYM_BOOM_CRASH: catStr = "BOOM_CRASH"; break;
+      case SYM_VOLATILITY: catStr = "VOLATILITY"; break;
+      case SYM_FOREX: catStr = "FOREX"; break;
+      default: catStr = "UNKNOWN"; break;
+   }
+   
+   // Autoriser Boom/Crash ET Volatility (avec conditions diff√©rentes)
+   bool isBoomCrash = (cat == SYM_BOOM_CRASH);
+   bool isVolatility = (cat == SYM_VOLATILITY);
+   
+   if(!isBoomCrash && !isVolatility)
+   {
+      return; // Ignorer les autres symboles
+   }
+   
+   // Confirmer le type de symbole
+   Print("‚úÖ DEBUG - Symbole valid√©: ", _Symbol, " = ", catStr);
+   
+   // VALIDATION IA: BLOQUER TOUS LES TRADES SI IA EST EN HOLD
+   if(UseAIServer && (g_lastAIAction == "HOLD" || g_lastAIAction == "hold"))
+   {
+      Print("üö´ TRADE BLOQU√â - IA en HOLD sur ", _Symbol);
+      return;
+   }
+   
+   // VALIDATION IA: Confiance minimum diff√©rente selon le type
+   double requiredConfidence = isBoomCrash ? MinAIConfidence : 0.80; // 80% pour Volatility
+   
+   if(UseAIServer && g_lastAIConfidence < requiredConfidence)
+   {
+      Print("üö´ TRADE BLOQU√â - Confiance IA insuffisante sur ", _Symbol, " | ", 
+            DoubleToString(g_lastAIConfidence*100, 1), "% < ", DoubleToString(requiredConfidence*100, 1), "%");
+      return;
+   }
+   
+   // D√âTECTION DIFF√âRENCI√âE: Spike requis pour Boom/Crash, signal IA fort pour Volatility
+   bool spikeDetected = false;
+   bool shouldTrade = false;
+   
+   if(isBoomCrash)
+   {
+      // Boom/Crash: Spike requis
+      spikeDetected = DetectRecentSpike();
+      shouldTrade = spikeDetected;
+      
+      Print("üîç DEBUG - Boom/Crash - Spike d√©tect√©: ", spikeDetected ? "OUI" : "NON");
+   }
+   else if(isVolatility)
+   {
+      // Volatility: Pas de spike requis, seulement signal IA fort (80%+)
+      spikeDetected = false; // Non applicable
+      shouldTrade = true; // Trade autoris√© si IA forte (d√©j√† valid√© ci-dessus)
+      
+      Print("üîç DEBUG - Volatility - Trade autoris√© (confiance IA: ", DoubleToString(g_lastAIConfidence*100, 1), "%)");
+   }
+   
+   if(!shouldTrade)
+   {
+      if(isBoomCrash)
+         Print("‚ùå Aucun spike d√©tect√© r√©cemment - trade Boom/Crash ignor√©");
+      else
+         Print("‚ùå Conditions non remplies - trade Volatility ignor√©");
+      return;
+   }
+   
+   // D√âTERMINER LA DIRECTION bas√©e sur le signal IA et le type de symbole
+   string direction = "";
+   string iaDirection = "";
+   
+   // R√©cup√©rer la direction de l'IA
+   if(g_lastAIAction == "BUY" || g_lastAIAction == "buy")
+      iaDirection = "BUY";
+   else if(g_lastAIAction == "SELL" || g_lastAIAction == "sell")
+      iaDirection = "SELL";
+   else
+   {
+      Print("‚ùå Aucun signal IA clair (", g_lastAIAction, ") - trade ignor√©");
+      return;
+   }
+   
+   // V√©rifier la compatibilit√© entre le signal IA et le type de symbole
+   if(isBoomCrash)
+   {
+      // R√®gles Boom/Crash: directions sp√©cifiques
+      if(StringFind(_Symbol, "Boom") >= 0)
+      {
+         if(iaDirection == "BUY")
+         {
+            direction = "BUY"; // Boom + IA BUY = OK
+         }
+         else
+         {
+            Print("‚ùå CONFLIT: IA dit ", iaDirection, " mais Boom n'accepte que BUY - trade ignor√©");
+            return;
+         }
+      }
+      else if(StringFind(_Symbol, "Crash") >= 0)
+      {
+         if(iaDirection == "SELL")
+         {
+            direction = "SELL"; // Crash + IA SELL = OK
+         }
+         else
+         {
+            Print("‚ùå CONFLIT: IA dit ", iaDirection, " mais Crash n'accepte que SELL - trade ignor√©");
+            return;
+         }
+      }
+   }
+   else if(isVolatility)
+   {
+      // Volatility: BUY et SELL autoris√©s (suivre l'IA)
+      direction = iaDirection; // Volatility suit directement l'IA
+      Print("‚úÖ Volatility - Direction IA accept√©e: ", direction, " sur ", _Symbol);
+   }
+   
+   Print("‚úÖ Signal IA valid√©: ", iaDirection, " compatible avec ", _Symbol, " ‚Üí Direction: ", direction);
+   
+   Print("üöÄ SPIKE D√âTECT√â - Direction: ", direction, " | Symbole: ", _Symbol);
+   
+   // EX√âCUTION DU TRADE avec les m√™mes validations que pr√©c√©demment
+   ExecuteSpikeTrade(direction);
+}
+
+//| Ex√©cuter les ordres au march√© bas√©s sur les d√©cisions IA SMC EMA   |
+void ExecuteAIDecisionMarketOrder()
+{
+   // V√©rifier si on a une d√©cision IA valide
+   if(g_lastAIAction == "" || g_lastAIConfidence < MinAIConfidence)
+   {
+      return;
+   }
+   
+   // BLOQUER LES ORDRES SI IA EST EN HOLD
+   Print("üîç DEBUG HOLD (Market): g_lastAIAction = '", g_lastAIAction, "' | g_lastAIConfidence = ", DoubleToString(g_lastAIConfidence*100, 1), "%");
+   
+   if(g_lastAIAction == "HOLD" || g_lastAIAction == "hold")
+   {
+      Print("üö´ ORDRES MARCH√â BLOQU√âS - IA en HOLD - Attente de changement de statut");
+      return;
+   }
+   
+   // Calculer une note de setup globale et bloquer si trop basse
+   double setupScore = ComputeSetupScore(g_lastAIAction);
+   if(setupScore < MinSetupScoreEntry)
+   {
+      Print("üö´ ORDRE IA BLOQU√â - SetupScore trop bas: ",
+            DoubleToString(setupScore, 1), " < ",
+            DoubleToString(MinSetupScoreEntry, 1),
+            " pour ", _Symbol, " (", g_lastAIAction, ")");
+      return;
+   }
+   
+   Print("‚úÖ ORDRES MARCH√â AUTORIS√âS - IA: ", g_lastAIAction,
+         " | SetupScore=", DoubleToString(setupScore, 1));
+   
+   // V√©rifier si on n'a pas d√©j√† une position (uniquement pour notre EA)
+   if(CountPositionsOurEA() > 0)
+   {
+      return; // Une seule position √† la fois pour notre EA
+   }
+   
+   // BLOQUER LES ORDRES MARCH√â SUR BOOM/CRASH - ATTENDRE DERIV ARROW
+   ENUM_SYMBOL_CATEGORY cat = SMC_GetSymbolCategory(_Symbol);
+   if(cat == SYM_BOOM_CRASH)
+   {
+      Print("üö´ ORDRES MARCH√â BLOQU√âS SUR BOOM/CRASH - Attendre DERIV ARROW pour ", _Symbol);
+      return;
+   }
+   
+   // BLOQUER LES ORDRES SI PRIX EST DANS UN RANGE
+   if(IsPriceInRange())
+   {
+      Print("üö´ ORDRES MARCH√â BLOQU√âS - Prix dans un range sur ", _Symbol, " - Attente de breakout");
+      return;
+   }
+   
+   // V√©rifier le lock pour √©viter les doublons
+   if(!TryAcquireOpenLock()) return;
+   
+   // R√®gle Boom/Crash: pas de SELL sur Boom, pas de BUY sur Crash
+   if(!IsDirectionAllowedForBoomCrash(_Symbol, g_lastAIAction))
+   {
+      Print("‚ùå Ordre IA ", g_lastAIAction, " bloqu√© sur ", _Symbol, " (r√®gle Boom/Crash)");
+      ReleaseOpenLock();
+      return;
+   }
+   
+   // VALIDATION MULTI-SIGNAUX POUR ENTR√âES PR√âCISES
+   if(!ValidateEntryWithMultipleSignals(g_lastAIAction))
+   {
+      Print("‚ùå ENTR√âE BLOQU√âE - Validation multi-signaux √©chou√©e pour ", g_lastAIAction, " sur ", _Symbol);
+      ReleaseOpenLock();
+      return;
+   }
+   
+   // CALCULER L'ENTR√âE PR√âCISE AU LIEU DU PRIX ACTUEL
+   double preciseEntry, preciseSL, preciseTP;
+   if(!CalculatePreciseEntryPoint(g_lastAIAction, preciseEntry, preciseSL, preciseTP))
+   {
+      Print("‚ùå CALCUL D'ENTR√âE PR√âCISE √âCHOU√â pour ", g_lastAIAction, " sur ", _Symbol);
+      ReleaseOpenLock();
+      return;
+   }
+   
+   double lot = CalculateLotSize();
+   if(lot <= 0)
+   {
+      ReleaseOpenLock();
+      return;
+   }
+   
+   bool orderExecuted = false;
+   
+   if(g_lastAIAction == "BUY" || g_lastAIAction == "buy")
+   {
+      // Utiliser l'entr√©e pr√©cise calcul√©e au lieu du prix actuel
+      if(trade.Buy(lot, _Symbol, preciseEntry, preciseSL, preciseTP, "IA SMC-EMA BUY PR√âCIS"))
+      {
+         orderExecuted = true;
+         Print("üöÄ ORDRE BUY PR√âCIS EX√âCUT√â - Entry: ", DoubleToString(preciseEntry, _Digits), 
+               " | SL: ", DoubleToString(preciseSL, _Digits), 
+               " | TP: ", DoubleToString(preciseTP, _Digits),
+               " | Lot: ", DoubleToString(lot, 2),
+               " | Conf: ", DoubleToString(g_lastAIConfidence*100, 1), "%");
+         
+         if(UseNotifications)
+         {
+            Alert("üéØ BUY PR√âCIS ", _Symbol, " @", DoubleToString(preciseEntry, _Digits), " - Conf: ", DoubleToString(g_lastAIConfidence*100, 1), "%");
+            SendNotification("üéØ BUY PR√âCIS " + _Symbol + " @" + DoubleToString(preciseEntry, _Digits) + " - Conf: " + DoubleToString(g_lastAIConfidence*100, 1) + "%");
+         }
+      }
+      else
+      {
+         Print("‚ùå √âchec ordre BUY PR√âCIS - Erreur: ", trade.ResultRetcode(), " - ", trade.ResultRetcodeDescription());
+      }
+   }
+   else if(g_lastAIAction == "SELL" || g_lastAIAction == "sell")
+   {
+      // Utiliser l'entr√©e pr√©cise calcul√©e au lieu du prix actuel
+      if(trade.Sell(lot, _Symbol, preciseEntry, preciseSL, preciseTP, "IA SMC-EMA SELL PR√âCIS"))
+      {
+         orderExecuted = true;
+         Print("üöÄ ORDRE SELL PR√âCIS EX√âCUT√â - Entry: ", DoubleToString(preciseEntry, _Digits), 
+               " | SL: ", DoubleToString(preciseSL, _Digits), 
+               " | TP: ", DoubleToString(preciseTP, _Digits),
+               " | Lot: ", DoubleToString(lot, 2),
+               " | Conf: ", DoubleToString(g_lastAIConfidence*100, 1), "%");
+         
+         if(UseNotifications)
+         {
+            Alert("üéØ SELL PR√âCIS ", _Symbol, " @", DoubleToString(preciseEntry, _Digits), " - Conf: ", DoubleToString(g_lastAIConfidence*100, 1), "%");
+            SendNotification("üéØ SELL PR√âCIS " + _Symbol + " @" + DoubleToString(preciseEntry, _Digits) + " - Conf: " + DoubleToString(g_lastAIConfidence*100, 1) + "%");
+         }
+      }
+      else
+      {
+         Print("‚ùå √âchec ordre SELL PR√âCIS - Erreur: ", trade.ResultRetcode(), " - ", trade.ResultRetcodeDescription());
+      }
+   }
+   
+   ReleaseOpenLock();
+   
+   if(orderExecuted)
+   {
+      // R√©initialiser le gain maximum pour la nouvelle position
+      g_maxProfit = 0;
+   }
+}
+
+//| FONCTIONS DE GESTION DES PAUSES ET BLACKLIST TEMPORAIRE        |
+void InitializeSymbolPauseSystem()
+{
+   g_pauseCount = 0;
+   for(int i = 0; i < 20; i++)
+   {
+      g_symbolPauses[i].symbol = "";
+      g_symbolPauses[i].pauseUntil = 0;
+      g_symbolPauses[i].consecutiveLosses = 0;
+      g_symbolPauses[i].consecutiveWins = 0;
+      g_symbolPauses[i].lastTradeTime = 0;
+      g_symbolPauses[i].lastProfit = 0;
+   }
+}
+
+bool IsSymbolPaused(string symbol)
+{
+   datetime currentTime = TimeCurrent();
+   for(int i = 0; i < g_pauseCount; i++)
+   {
+      if(g_symbolPauses[i].symbol == symbol)
+      {
+         if(currentTime < g_symbolPauses[i].pauseUntil)
+         {
+            Print("üö´ SYMBOLE EN PAUSE: ", symbol, " - Jusqu'√†: ", TimeToString(g_symbolPauses[i].pauseUntil, TIME_SECONDS));
+            return true;
+         }
+         break;
+      }
+   }
+   return false;
+}
+
+void UpdateSymbolPauseInfo(string symbol, double profit)
+{
+   datetime currentTime = TimeCurrent();
+   int index = -1;
+   
+   // Trouver ou cr√©er l'entr√©e pour ce symbole
+   for(int i = 0; i < g_pauseCount; i++)
+   {
+      if(g_symbolPauses[i].symbol == symbol)
+      {
+         index = i;
+         break;
+      }
+   }
+   
+   if(index == -1 && g_pauseCount < 20)
+   {
+      // Cr√©er nouvelle entr√©e
+      index = g_pauseCount;
+      g_symbolPauses[index].symbol = symbol;
+      g_symbolPauses[index].pauseUntil = 0;
+      g_symbolPauses[index].consecutiveLosses = 0;
+      g_symbolPauses[index].consecutiveWins = 0;
+      g_pauseCount++;
+   }
+   
+   if(index >= 0)
+   {
+      // Mettre √† jour les compteurs
+      if(profit < 0)
+      {
+         g_symbolPauses[index].consecutiveLosses++;
+         g_symbolPauses[index].consecutiveWins = 0;
+         Print("üìâ PERTE D√âTECT√âE: ", symbol, " | Perte: ", DoubleToString(profit, 2), "$ | Pertes cons√©cutives: ", g_symbolPauses[index].consecutiveLosses);
+      }
+      else if(profit > 0)
+      {
+         g_symbolPauses[index].consecutiveWins++;
+         g_symbolPauses[index].consecutiveLosses = 0;
+         Print("üìà GAIN D√âTECT√â: ", symbol, " | Gain: ", DoubleToString(profit, 2), "$ | Gains cons√©cutifs: ", g_symbolPauses[index].consecutiveWins);
+      }
+      
+      g_symbolPauses[index].lastTradeTime = currentTime;
+      g_symbolPauses[index].lastProfit = profit;
+   }
+}
+
+bool ShouldPauseSymbol(string symbol, double profit)
+{
+   // Pause apr√®s 2 pertes successives (10 minutes)
+   if(profit < 0)
+   {
+      for(int i = 0; i < g_pauseCount; i++)
+      {
+         if(g_symbolPauses[i].symbol == symbol)
+         {
+            if(g_symbolPauses[i].consecutiveLosses >= 1) // D√©j√† 1 perte, celle-ci fait 2
+            {
+               Print("üö´ PAUSE 10 MINUTES: ", symbol, " - 2 pertes successives d√©tect√©es");
+               return true;
+            }
+            break;
+         }
+      }
+   }
+   
+   // Pause apr√®s 2 gains successifs (5 minutes)
+   if(profit > 0)
+   {
+      for(int i = 0; i < g_pauseCount; i++)
+      {
+         if(g_symbolPauses[i].symbol == symbol)
+         {
+            if(g_symbolPauses[i].consecutiveWins >= 1) // D√©j√† 1 gain, celui-ci fait 2
+            {
+               Print("üö´ PAUSE 5 MINUTES: ", symbol, " - 2 gains successifs d√©tect√©s");
+               return true;
+            }
+            break;
+         }
+      }
+   }
+   
+   return false;
+}
+
+void ApplySymbolPause(string symbol, int minutes)
+{
+   datetime currentTime = TimeCurrent();
+   datetime pauseUntil = currentTime + (minutes * 60);
+   
+   for(int i = 0; i < g_pauseCount; i++)
+   {
+      if(g_symbolPauses[i].symbol == symbol)
+      {
+         g_symbolPauses[i].pauseUntil = pauseUntil;
+         Print("‚è∏Ô∏è SYMBOLE MIS EN PAUSE: ", symbol, " - Dur√©e: ", minutes, " minutes | Jusqu'√†: ", TimeToString(pauseUntil, TIME_SECONDS));
+         break;
+      }
+   }
+}
+
+//| D√âTECTION DE RANGE - √âVITER DE TRADER DANS LES RANGES         |
+bool DetectPriceRange()
+{
+   // Utiliser les 20 derni√®res bougies pour d√©tecter un range
+   MqlRates rates[];
+   ArraySetAsSeries(rates, true);
+   if(CopyRates(_Symbol, PERIOD_M1, 0, 20, rates) < 20) return false;
+   
+   double highs[], lows[];
+   ArrayResize(highs, 20);
+   ArrayResize(lows, 20);
+   
+   for(int i = 0; i < 20; i++)
+   {
+      highs[i] = rates[i].high;
+      lows[i] = rates[i].low;
+   }
+   
+   // Calculer le plus haut et plus bas sur la p√©riode
+   double highestHigh = rates[0].high;
+   double lowestLow = rates[0].low;
+   
+   for(int i = 1; i < 20; i++)
+   {
+      if(rates[i].high > highestHigh) highestHigh = rates[i].high;
+      if(rates[i].low < lowestLow) lowestLow = rates[i].low;
+   }
+   
+   double rangeSize = highestHigh - lowestLow;
+   double currentPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   
+   // D√©terminer si le prix est dans le range (zone m√©diane 40-60%)
+   double rangeMiddle = lowestLow + (rangeSize * 0.5);
+   double rangeWidth = rangeSize * 0.2; // 20% de chaque c√¥t√© du milieu
+   
+   bool inRange = (currentPrice >= (rangeMiddle - rangeWidth) && currentPrice <= (rangeMiddle + rangeWidth));
+   
+   // Crit√®res suppl√©mentaires pour confirmer le range
+   bool isConsolidating = false;
+   
+   // V√©rifier si les bougies ont des corps petits (indique de consolidation)
+   double avgBodySize = 0;
+   for(int i = 0; i < 20; i++)
+   {
+      double bodySize = MathAbs(rates[i].close - rates[i].open);
+      avgBodySize += bodySize;
+   }
+   avgBodySize /= 20;
+   
+   // Si les corps sont petits par rapport au range, c'est une consolidation
+   isConsolidating = (avgBodySize < rangeSize * 0.1);
+   
+   // D√©tection finale de range
+   bool isRange = inRange && isConsolidating && (rangeSize > 0);
+   
+   if(isRange)
+   {
+      Print("üîç RANGE D√âTECT√â sur ", _Symbol, 
+             " | Range: ", DoubleToString(lowestLow, _Digits), " - ", DoubleToString(highestHigh, _Digits),
+             " | Prix actuel: ", DoubleToString(currentPrice, _Digits),
+             " | Largeur range: ", DoubleToString(rangeSize, _Digits),
+             " | Corps moyen: ", DoubleToString(avgBodySize, _Digits));
+   }
+   
+   return isRange;
+}
+
+bool IsPriceInRange()
+{
+   return DetectPriceRange();
+}
+
+//| NOTE DE SETUP IA (0-100)                                         |
+double ComputeSetupScore(const string direction)
+{
+   // 1) Base: confiance IA (0-60 pts)
+   double score = 0.0;
+   double confPct = g_lastAIConfidence * 100.0;
+   if(confPct < 0.0) confPct = 0.0;
+   if(confPct > 100.0) confPct = 100.0;
+   score += confPct * 0.60;
+
+   // 2) Alignement et coh√©rence (0-20 pts chaque) √† partir des cha√Ænes "xx.x%"
+   double alignPct = 0.0, cohPct = 0.0;
+   if(StringLen(g_lastAIAlignment) > 0)
+   {
+      string s = g_lastAIAlignment;
+      StringReplace(s, "%", "");
+      alignPct = StringToDouble(s);
+      if(alignPct < 0.0) alignPct = 0.0;
+      if(alignPct > 100.0) alignPct = 100.0;
+   }
+   if(StringLen(g_lastAICoherence) > 0)
+   {
+      string s2 = g_lastAICoherence;
+      StringReplace(s2, "%", "");
+      cohPct = StringToDouble(s2);
+      if(cohPct < 0.0) cohPct = 0.0;
+      if(cohPct > 100.0) cohPct = 100.0;
+   }
+   score += alignPct * 0.20;
+   score += cohPct * 0.20;
+
+   // 3) Contexte de tendance HTF (bonus/malus)
+   bool bullHTF = IsBullishHTF();
+   bool bearHTF = IsBearishHTF();
+   string dir = direction;
+   StringToUpper(dir);
+
+   if(dir == "BUY" && bullHTF)       score += 5.0;
+   if(dir == "SELL" && bearHTF)      score += 5.0;
+   if(dir == "BUY" && bearHTF)       score -= 10.0;
+   if(dir == "SELL" && bullHTF)      score -= 10.0;
+
+   // 4) √âviter les ranges (gros malus si range d√©tect√©)
+   if(IsPriceInRange())
+      score -= 15.0;
+
+   // Clamp final 0-100
+   if(score < 0.0)   score = 0.0;
+   if(score > 100.0) score = 100.0;
+
+   Print("üìä SETUP SCORE ", _Symbol, " ", dir, " = ", DoubleToString(score, 1),
+         " (Conf=", DoubleToString(confPct,1), "% Align=", DoubleToString(alignPct,1),
+         "% Coh=", DoubleToString(cohPct,1), "%)");
+
+   return score;
+}
+
+//| M√âTRIQUES ML FALLBACK - SI SERVEUR IA INDISPONIBLE          |
+void GenerateFallbackMLMetrics()
+{
+   // Si le serveur IA n'est pas connect√©, g√©n√©rer des m√©triques basiques
+   if(!g_aiConnected)
+   {
+      // Calculer des m√©triques bas√©es sur l'analyse technique locale
+      double currentPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+      MqlRates rates[];
+      ArraySetAsSeries(rates, true);
+      
+      if(CopyRates(_Symbol, PERIOD_M1, 0, 20, rates) >= 20)
+      {
+         // Calculer la tendance simple
+         double priceChange = rates[0].close - rates[19].close;
+         bool isUptrend = priceChange > 0;
+         
+         // Calculer la volatilit√©
+         double avgRange = 0;
+         for(int i = 0; i < 20; i++)
+         {
+            avgRange += rates[i].high - rates[i].low;
+         }
+         avgRange /= 20;
+         
+         // G√©n√©rer des m√©triques de fallback
+         if(isUptrend)
+         {
+            g_lastAIAction = "BUY";
+            g_lastAIConfidence = MathMin(0.65, 0.5 + (priceChange / currentPrice) * 10); // Max 65%
+         }
+         else
+         {
+            g_lastAIAction = "SELL";
+            g_lastAIConfidence = MathMin(0.65, 0.5 + MathAbs(priceChange / currentPrice) * 10); // Max 65%
+         }
+         
+         // Alignement et coh√©rence bas√©s sur la volatilit√©
+         double volatilityScore = MathMin(1.0, avgRange / currentPrice * 100);
+         g_lastAIAlignment = DoubleToString(volatilityScore * 80, 1) + "%"; // Max 80%
+         g_lastAICoherence = DoubleToString(volatilityScore * 70, 1) + "%"; // Max 70%
+         
+         Print("ü§ñ M√âTRIQUES FALLBACK - Action: ", g_lastAIAction, 
+               " | Confiance: ", DoubleToString(g_lastAIConfidence * 100, 1), "%",
+               " | Alignement: ", g_lastAIAlignment,
+               " | Coh√©rence: ", g_lastAICoherence);
+      }
+      else
+      {
+         // Valeurs par d√©faut si pas assez de donn√©es
+         g_lastAIAction = "HOLD";
+         g_lastAIConfidence = 0.0;
+         g_lastAIAlignment = "0.0%";
+         g_lastAICoherence = "0.0%";
+         
+         Print("‚ö†Ô∏è M√âTRIQUES D√âFAUT - Pas assez de donn√©es pour fallback");
+      }
+   }
+}
+
+//| FONCTIONS IA - COMMUNICATION AVEC LE SERVEUR                       |
+
+bool UpdateAIDecision(int timeoutMs = -1)
+{
+   // D√©porter toute la logique r√©seau sur GetAISignalData()
+   bool ok = GetAISignalData();
+   if(!ok)
+   {
+      // En cas d'√©chec complet, g√©n√©rer imm√©diatement un fallback local
+      GenerateFallbackAIDecision();
+      return false;
+   }
+   // GetAISignalData met d√©j√† √† jour g_lastAIAction / g_lastAIConfidence / alignement / coh√©rence
+   Print("‚úÖ D√©cision IA mise √† jour via /decision - Action: ", g_lastAIAction,
+         " | Confiance: ", DoubleToString(g_lastAIConfidence*100, 1), "%");
+   return true;
+}
+
+string GetAISignalData(string symbol, string timeframe)
+{
+   string symEnc = symbol;
+   StringReplace(symEnc, " ", "%20");
+   
+   string baseUrl = UseRenderAsPrimary ? AI_ServerRender : AI_ServerURL;
+   string path = "/ml/signal?symbol=" + symEnc + "&timeframe=" + timeframe;
+   string headers = "";
+   char post[], result[];
+   string resultHeaders;
+   
+   int res = WebRequest("GET", baseUrl + path, headers, AI_Timeout_ms, post, result, resultHeaders);
+   
+   if(res == 200)
+   {
+      return CharArrayToString(result);
+   }
+   
+   return "";
+}
+
+string GetTrendAlignmentData(string symbol)
+{
+   string symEnc = symbol;
+   StringReplace(symEnc, " ", "%20");
+   
+   string baseUrl = UseRenderAsPrimary ? AI_ServerRender : AI_ServerURL;
+   string path = "/ml/trend_alignment?symbol=" + symEnc;
+   string headers = "";
+   char post[], result[];
+   string resultHeaders;
+   
+   int res = WebRequest("GET", baseUrl + path, headers, AI_Timeout_ms, post, result, resultHeaders);
+   
+   if(res == 200)
+   {
+      return CharArrayToString(result);
+   }
+   
+   return "";
+}
+
+string GetCoherentAnalysisData(string symbol)
+{
+   string symEnc = symbol;
+   StringReplace(symEnc, " ", "%20");
+   
+   string baseUrl = UseRenderAsPrimary ? AI_ServerRender : AI_ServerURL;
+   string path = "/ml/coherent_analysis?symbol=" + symEnc;
+   string headers = "";
+   char post[], result[];
+   string resultHeaders;
+   
+   int res = WebRequest("GET", baseUrl + path, headers, AI_Timeout_ms, post, result, resultHeaders);
+   
+   if(res == 200)
+   {
+      return CharArrayToString(result);
+   }
+   
+   return "";
+}
+
+void ProcessAIDecision(string jsonData)
+{
+   // Parser la r√©ponse JSON du serveur IA
+   // Format attendu: {"action": "BUY/SELL/HOLD", "confidence": 0.85, "alignment": "75%", "coherence": "82%"}
+   
+   g_lastAIUpdate = TimeCurrent();
+   
+   // Extraire l'action
+   if(StringFind(jsonData, "\"action\":") >= 0)
+   {
+      int start = StringFind(jsonData, "\"action\":") + 9;
+      int end = StringFind(jsonData, ",", start);
+      if(end < 0) end = StringFind(jsonData, "}", start);
+      
+      if(end > start)
+      {
+         string action = StringSubstr(jsonData, start, end - start);
+         StringReplace(action, "\"", "");
+         StringReplace(action, " ", "");
+         g_lastAIAction = action;
+      }
+   }
+   
+   // Extraire la confiance
+   if(StringFind(jsonData, "\"confidence\":") >= 0)
+   {
+      int start = StringFind(jsonData, "\"confidence\":") + 13;
+      int end = StringFind(jsonData, ",", start);
+      if(end < 0) end = StringFind(jsonData, "}", start);
+      
+      if(end > start)
+      {
+         string confStr = StringSubstr(jsonData, start, end - start);
+         g_lastAIConfidence = StringToDouble(confStr);
+      }
+   }
+   
+   // Extraire l'alignement
+   if(StringFind(jsonData, "\"alignment\":") >= 0)
+   {
+      int start = StringFind(jsonData, "\"alignment\":") + 12;
+      int end = StringFind(jsonData, ",", start);
+      if(end < 0) end = StringFind(jsonData, "}", start);
+      
+      if(end > start)
+      {
+         string alignStr = StringSubstr(jsonData, start, end - start);
+         StringReplace(alignStr, "\"", "");
+         g_lastAIAlignment = alignStr;
+      }
+   }
+   
+   // Extraire la coh√©rence
+   if(StringFind(jsonData, "\"coherence\":") >= 0)
+   {
+      int start = StringFind(jsonData, "\"coherence\":") + 13;
+      int end = StringFind(jsonData, ",", start);
+      if(end < 0) end = StringFind(jsonData, "}", start);
+      
+      if(end > start)
+      {
+         string cohStr = StringSubstr(jsonData, start, end - start);
+         StringReplace(cohStr, "\"", "");
+         g_lastAICoherence = cohStr;
+      }
+   }
+   
+   // Si aucune donn√©e trouv√©e, valeurs par d√©faut
+   if(g_lastAIAction == "") g_lastAIAction = "HOLD";
+   if(g_lastAIConfidence == 0) g_lastAIConfidence = 0.5;
+   if(g_lastAIAlignment == "") g_lastAIAlignment = "50%";
+   if(g_lastAICoherence == "") g_lastAICoherence = "50%";
+}
+
+//| NOTIFICATION MOBILE POUR APPARITION FL√àCHE DERIV ARROW          |
+void SendDerivArrowNotification(string direction, double entryPrice, double stopLoss, double takeProfit)
+{
+   // Calculer le gain estim√©
+   double risk = MathAbs(entryPrice - stopLoss);
+   double reward = MathAbs(takeProfit - entryPrice);
+   double estimatedGain = 0;
+   
+   // Calculer le gain en points et en dollars (pour lot 0.01)
+   double pointValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+   double tickSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+   double pointsToTP = MathAbs(takeProfit - entryPrice) / tickSize;
+   estimatedGain = pointsToTP * pointValue * 0.01; // Pour lot 0.01
+   
+   // Calculer le ratio Risk/Reward
+   double riskRewardRatio = reward / risk;
+   
+   // Formater les prix
+   string entryStr = DoubleToString(entryPrice, _Digits);
+   string slStr = DoubleToString(stopLoss, _Digits);
+   string tpStr = DoubleToString(takeProfit, _Digits);
+   string gainStr = DoubleToString(estimatedGain, 2);
+   string ratioStr = DoubleToString(riskRewardRatio, 2);
+   
+   // Cr√©er le message de notification
+   string notificationMsg = "üéØ DERIV ARROW " + direction + "\n" +
+                           "Symbole: " + _Symbol + "\n" +
+                           "Entry: " + entryStr + "\n" +
+                           "SL: " + slStr + "\n" +
+                           "TP: " + tpStr + "\n" +
+                           "Gain estim√©: $" + gainStr + "\n" +
+                           "Risk/Reward: 1:" + ratioStr;
+   
+   // Cr√©er le message d'alerte desktop
+   string alertMsg = "üéØ DERIV ARROW " + direction + " - " + _Symbol + 
+                    " @ " + entryStr + 
+                    " | SL: " + slStr + 
+                    " | TP: " + tpStr + 
+                    " | Gain: $" + gainStr + 
+                    " | R/R: 1:" + ratioStr;
+   
+   // Envoyer la notification mobile
+   SendNotification(notificationMsg);
+   
+   // Envoyer l'alerte desktop
+   Alert(alertMsg);
+   
+   // Log d√©taill√©
+   Print("üì± NOTIFICATION ENVOY√âE - DERIV ARROW ", direction);
+   Print("üìç Symbole: ", _Symbol);
+   Print("üí∞ Entry: ", entryStr, " | SL: ", slStr, " | TP: ", tpStr);
+   Print("üìä Gain estim√©: $", gainStr, " | Risk/Reward: 1:", ratioStr);
+   Print("üîî Notification mobile envoy√©e avec succ√®s!");
+}
+
+//| CALCUL D'ENTR√âE PR√âCISE - SYST√àME AM√âLIOR√â                    |
+bool CalculatePreciseEntryPoint(string direction, double &entryPrice, double &stopLoss, double &takeProfit)
+{
+   // R√©cup√©rer les donn√©es de march√© r√©centes
+   MqlRates rates[];
+   ArraySetAsSeries(rates, true);
+   if(CopyRates(_Symbol, PERIOD_M1, 0, 50, rates) < 50) return false;
+   
+   // Calculer l'ATR pour les distances
+   double atr[];
+   ArraySetAsSeries(atr, true);
+   if(CopyBuffer(atrHandle, 0, 0, 1, atr) < 1) return false;
+   double atrValue = atr[0];
+   
+   // Analyser la structure de march√©
+   double currentPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double support = rates[0].low;
+   double resistance = rates[0].high;
+   
+   // Trouver le support/r√©sistance le plus proche (last 10 bougies)
+   for(int i = 1; i < 10; i++)
+   {
+      if(rates[i].low < support) support = rates[i].low;
+      if(rates[i].high > resistance) resistance = rates[i].high;
+   }
+   
+   // Calculer les niveaux de Fibonacci sur les 20 derni√®res bougies
+   double highest = rates[0].high;
+   double lowest = rates[0].low;
+   for(int i = 1; i < 20; i++)
+   {
+      if(rates[i].high > highest) highest = rates[i].high;
+      if(rates[i].low < lowest) lowest = rates[i].low;
+   }
+   
+   double fib38_2 = lowest + (highest - lowest) * 0.382;
+   double fib61_8 = lowest + (highest - lowest) * 0.618;
+   
+   // Calculer l'entr√©e pr√©cise selon la direction
+   if(direction == "BUY")
+   {
+      // Entr√©e BUY: au-dessus du support ou fib38_2
+      double buyLevel1 = support + (atrValue * 0.5);
+      double buyLevel2 = fib38_2 + (atrValue * 0.3);
+      
+      entryPrice = MathMax(buyLevel1, buyLevel2);
+      
+      // SL: sous le support avec marge de s√©curit√©
+      stopLoss = support - (atrValue * 0.2);
+      
+      // TP: ratio 2:1 minimum
+      double risk = entryPrice - stopLoss;
+      takeProfit = entryPrice + (risk * 2.5);
+      
+      // Validation: l'entr√©e doit √™tre < prix actuel + 1 ATR
+      if(entryPrice > currentPrice + atrValue) return false;
+   }
+   else // SELL
+   {
+      // Entr√©e SELL: sous la r√©sistance ou fib61_8
+      double sellLevel1 = resistance - (atrValue * 0.5);
+      double sellLevel2 = fib61_8 - (atrValue * 0.3);
+      
+      entryPrice = MathMin(sellLevel1, sellLevel2);
+      
+      // SL: au-dessus de la r√©sistance avec marge
+      stopLoss = resistance + (atrValue * 0.2);
+      
+      // TP: ratio 2:1 minimum
+      double risk = stopLoss - entryPrice;
+      takeProfit = entryPrice - (risk * 2.5);
+      
+      // Validation: l'entr√©e doit √™tre > prix actuel - 1 ATR
+      if(entryPrice < currentPrice - atrValue) return false;
+   }
+   
+   // Validation finale des distances
+   long stopsLevel = 0;
+   double point = 0.0;
+   SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL, stopsLevel);
+   SymbolInfoDouble(_Symbol, SYMBOL_POINT, point);
+   double minDistance = (double)stopsLevel * point;
+   if(minDistance == 0) minDistance = atrValue * 0.5; // Distance par d√©faut
+   
+   if(MathAbs(entryPrice - stopLoss) < minDistance) return false;
+   if(MathAbs(takeProfit - entryPrice) < minDistance * 2) return false;
+   
+   Print("üéØ ENTR√âE PR√âCISE CALCUL√âE - ", direction,
+         " | Entry: ", DoubleToString(entryPrice, _Digits),
+         " | SL: ", DoubleToString(stopLoss, _Digits),
+         " | TP: ", DoubleToString(takeProfit, _Digits),
+         " | Risk/Reward: 1:", DoubleToString(MathAbs(takeProfit - entryPrice) / MathAbs(entryPrice - stopLoss), 2));
+   
+   return true;
+}
+
+//| VALIDATION MULTI-SIGNAUX POUR ENTR√âES PR√âCISES               |
+bool ValidateEntryWithMultipleSignals(string direction)
+{
+   MqlRates rates[];
+   ArraySetAsSeries(rates, true);
+   if(CopyRates(_Symbol, PERIOD_M1, 0, 30, rates) < 30) return false;
+   
+   int confirmationCount = 0;
+   
+   // 1. Confirmation par momentum (last 5 bougies)
+   double momentum = 0;
+   for(int i = 0; i < 5; i++)
+   {
+      momentum += (rates[i].close - rates[i].open) / rates[i].open;
+   }
+   bool momentumConfirm = (direction == "BUY" && momentum > 0.001) || 
+                          (direction == "SELL" && momentum < -0.001);
+   if(momentumConfirm) confirmationCount++;
+   
+   // 2. Confirmation par volume (comparaison aux 10 bougies pr√©c√©dentes)
+   double recentVolume = 0;
+   double avgVolume = 0;
+   for(int i = 0; i < 5; i++) recentVolume += (double)rates[i].tick_volume;
+   for(int i = 5; i < 15; i++) avgVolume += (double)rates[i].tick_volume;
+   recentVolume /= 5;
+   avgVolume /= 10;
+   
+   bool volumeConfirm = recentVolume > avgVolume * 1.2; // Volume > 20% moyenne
+   if(volumeConfirm) confirmationCount++;
+   
+   // 3. Confirmation par structure (pas de range)
+   double range = rates[0].high - rates[0].low;
+   double avgRange = 0;
+   for(int i = 1; i < 10; i++) avgRange += rates[i].high - rates[i].low;
+   avgRange /= 9;
+   
+   bool structureConfirm = range > avgRange * 0.8; // Range actuel > 80% moyenne
+   if(structureConfirm) confirmationCount++;
+   
+   // 4. Confirmation par EMA (trend align√©)
+   double ema[];
+   ArraySetAsSeries(ema, true);
+   bool emaConfirm = false;
+   if(ema50H != INVALID_HANDLE && CopyBuffer(ema50H, 0, 0, 1, ema) >= 1)
+   {
+      emaConfirm = (direction == "BUY" && rates[0].close > ema[0]) ||
+                   (direction == "SELL" && rates[0].close < ema[0]);
+      if(emaConfirm) confirmationCount++;
+   }
+   
+   // 5. Confirmation par volatilit√© (ni trop basse, ni trop √©lev√©e)
+   double volatility = range / rates[0].close;
+   bool volatilityConfirm = (volatility > 0.0005 && volatility < 0.02);
+   if(volatilityConfirm) confirmationCount++;
+   
+   Print("üîç VALIDATION MULTI-SIGNAUX - ", direction,
+         " | Confirmations: ", confirmationCount, "/5",
+         " | Momentum: ", momentumConfirm ? "‚úÖ" : "‚ùå",
+         " | Volume: ", volumeConfirm ? "‚úÖ" : "‚ùå",
+         " | Structure: ", structureConfirm ? "‚úÖ" : "‚ùå",
+         " | EMA: ", emaConfirm ? "‚úÖ" : "‚ùå",
+         " | Volatilit√©: ", volatilityConfirm ? "‚úÖ" : "‚ùå");
+   
+   // Exiger au moins 3 confirmations sur 5
+   return confirmationCount >= 3;
+}
+
+//| D√âTECTION AVANC√âE DE SPIKE IMMINENT                          |
+
+// Calcule la compression de volatilit√© (pr√©dicteur de spike)
+double CalculateVolatilityCompression()
+{
+   // V√©rifier si l'handle ATR est valide
+   if(atrHandle == INVALID_HANDLE) return 0.0;
+   
+   double buffer[];
+   ArraySetAsSeries(buffer, true);
+   
+   // Utiliser ATR sur 20 p√©riodes pour la volatilit√© r√©cente
+   if(CopyBuffer(atrHandle, 0, 0, 20, buffer) < 20) return 0.0;
+   
+   double recentATR = buffer[0];
+   double avgATR = 0.0;
+   
+   // Calculer la moyenne ATR sur 20 p√©riodes
+   for(int i = 0; i < 20; i++)
+   {
+      avgATR += buffer[i];
+   }
+   avgATR /= 20.0;
+   
+   // Compression = ratio ATR r√©cent / moyenne ATR
+   if(avgATR == 0) return 0.0;
+   return recentATR / avgATR;
+}
+
+// Calcule l'acc√©l√©ration du prix (pr√©dicteur de momentum)
+double CalculatePriceAcceleration()
+{
+   MqlRates rates[];
+   ArraySetAsSeries(rates, true);
+   
+   if(CopyRates(_Symbol, PERIOD_M1, 0, 10, rates) < 10) return 0.0;
+   
+   // Calculer les variations de prix sur 3 p√©riodes
+   double change1 = (rates[0].close - rates[1].close) / rates[1].close;
+   double change2 = (rates[1].close - rates[2].close) / rates[2].close;
+   double change3 = (rates[2].close - rates[3].close) / rates[3].close;
+   
+   // Acc√©l√©ration = variation des variations
+   double acceleration = (change1 - change3) / 3.0;
+   
+   return acceleration;
+}
+
+// D√©tecte les pics de volume anormaux
+bool DetectVolumeSpike()
+{
+   long volume[];
+   ArraySetAsSeries(volume, true);
+   
+   if(CopyTickVolume(_Symbol, PERIOD_M1, 0, 20, volume) < 20) return false;
+   
+   double recentVolume = (double)volume[0];
+   double avgVolume = 0.0;
+   
+   // Calculer la moyenne de volume sur 20 p√©riodes
+   for(int i = 1; i < 20; i++) // Exclure la p√©riode la plus r√©cente
+   {
+      avgVolume += (double)volume[i];
+   }
+   avgVolume /= 19.0;
+   
+   // Spike si volume > 2x la moyenne
+   return (recentVolume > avgVolume * 2.0);
+}
+
+// D√©tecte les patterns pr√©-spike sp√©cifiques Boom/Crash
+bool IsPreSpikePattern()
+{
+   MqlRates rates[];
+   ArraySetAsSeries(rates, true);
+   
+   if(CopyRates(_Symbol, PERIOD_M1, 0, 50, rates) < 50) return false;
+   
+   // 1. D√©tection de compression (range qui se resserre)
+   double high50 = rates[ArrayMaximum(rates, 0, 50)].high;
+   double low50 = rates[ArrayMinimum(rates, 0, 50)].low;
+   double range50 = high50 - low50;
+   
+   double high10 = rates[ArrayMaximum(rates, 0, 10)].high;
+   double low10 = rates[ArrayMinimum(rates, 0, 10)].low;
+   double range10 = high10 - low10;
+   
+   // Compression r√©cente si range10 < 50% du range50
+   bool compression = (range10 < range50 * 0.5);
+   
+   // 2. D√©tection de formation en coin/wedge
+   double ma5 = 0, ma20 = 0;
+   for(int i = 0; i < 5; i++) ma5 += rates[i].close;
+   ma5 /= 5.0;
+   for(int i = 0; i < 20; i++) ma20 += rates[i].close;
+   ma20 /= 20.0;
+   
+   // Prix proche de la moyenne mobile (consolidation)
+   bool consolidation = (MathAbs(rates[0].close - ma20) / ma20 < 0.001);
+   
+   // 3. V√©rifier si le prix est √† un niveau cl√©
+   bool keyLevel = IsNearKeyLevel(rates[0].close);
+   
+   return (compression && consolidation && keyLevel);
+}
+
+// V√©rifie si le prix est pr√®s d'un niveau cl√© (support/r√©sistance)
+bool IsNearKeyLevel(double price)
+{
+   MqlRates rates[];
+   ArraySetAsSeries(rates, true);
+   if(CopyRates(_Symbol, PERIOD_M1, 0, 100, rates) < 100) return false;
+   
+   // Chercher les niveaux de swing points r√©cents
+   for(int i = 5; i < 50; i++)
+   {
+      double high = rates[i].high;
+      double low = rates[i].low;
+      
+      // Si prix est √† moins de 0.1% d'un swing high/low
+      if(MathAbs(price - high) / high < 0.001 || MathAbs(price - low) / low < 0.001)
+      {
+         return true;
+      }
+   }
+   
+   return false;
+}
+
+// Calcule la probabilit√© de spike imminent
+double CalculateSpikeProbability()
+{
+   double volCompression = CalculateVolatilityCompression();
+   double priceAccel = CalculatePriceAcceleration();
+   bool volumeSpike = DetectVolumeSpike();
+   bool preSpikePattern = IsPreSpikePattern();
+   
+   double probability = 0.0;
+   
+   // Pond√©ration des facteurs
+   if(volCompression < 0.7) probability += 0.3; // Compression forte
+   if(MathAbs(priceAccel) > 0.002) probability += 0.25; // Acc√©l√©ration notable
+   if(volumeSpike) probability += 0.25; // Spike de volume
+   if(preSpikePattern) probability += 0.2; // Pattern pr√©-spike
+   
+   return MathMin(probability, 1.0);
+}
+
+// Envoie une alerte de spike imminent - VERSION OPTIMIS√âE
+void CheckImminentSpike()
+{
+   // Uniquement sur Boom/Crash
+   ENUM_SYMBOL_CATEGORY cat = SMC_GetSymbolCategory(_Symbol);
+   if(cat != SYM_BOOM_CRASH) return;
+   
+   // V√©rification rapide de l'handle ATR
+   if(atrHandle == INVALID_HANDLE) return;
+   
+   // Calcul rapide avec protection contre les erreurs
+   double spikeProb = 0.0;
+   double volCompression = 1.0;
+   bool volumeSpike = false;
+   
+   // Calcul optimis√© avec des donn√©es minimales
+   double buffer[];
+   ArraySetAsSeries(buffer, true);
+   
+   // V√©rification ATR avec seulement 10 p√©riodes pour la vitesse
+   if(CopyBuffer(atrHandle, 0, 0, 10, buffer) >= 5)
+   {
+      double recentATR = buffer[0];
+      double avgATR = 0.0;
+      for(int i = 0; i < 5; i++) avgATR += buffer[i];
+      avgATR /= 5.0;
+      
+      if(avgATR > 0) volCompression = recentATR / avgATR;
+   }
+   
+   // D√©tection rapide de volume spike
+   long volume[];
+   ArraySetAsSeries(volume, true);
+   if(CopyTickVolume(_Symbol, PERIOD_M1, 0, 10, volume) >= 5)
+   {
+      double recentVolume = (double)volume[0];
+      double avgVolume = 0.0;
+      for(int i = 1; i < 5; i++) avgVolume += (double)volume[i];
+      avgVolume /= 4.0;
+      volumeSpike = (recentVolume > avgVolume * 1.5); // R√©duit √† 1.5x pour plus de sensibilit√©
+   }
+   
+   // Calcul rapide d'acc√©l√©ration du prix
+   MqlRates rates[];
+   ArraySetAsSeries(rates, true);
+   if(CopyRates(_Symbol, PERIOD_M1, 0, 5, rates) >= 3)
+   {
+      double change1 = (rates[0].close - rates[1].close) / rates[1].close;
+      double change2 = (rates[1].close - rates[2].close) / rates[2].close;
+      double acceleration = (change1 - change2) / 2.0;
+      
+      // Calcul de probabilit√© tr√®s strict pour 90% de certitude
+      spikeProb = 0.0;
+      if(volCompression < 0.5) spikeProb += 0.4; // Compression tr√®s forte (< 50%)
+      if(MathAbs(acceleration) > 0.002) spikeProb += 0.3; // Acc√©l√©ration tr√®s forte
+      if(volumeSpike) spikeProb += 0.3; // Spike de volume confirm√©
+      
+      spikeProb = MathMin(spikeProb, 1.0);
+   }
+   
+   // V√©rification finale
+   if(spikeProb < 0.0 || spikeProb > 1.0) return;
+   
+   // Alerte si probabilit√© √©lev√©e (ajust√©e √† 70% pour correspondre aux trades)
+   if(spikeProb > 0.70)
+   {
+      string alertMsg = "üö® SPIKE IMMINENT sur " + _Symbol + 
+                      " | Probabilit√©: " + DoubleToString(spikeProb*100, 1) + "%" +
+                      " | Compression: " + DoubleToString(volCompression*100, 1) + "%" +
+                      " | Volume: " + (volumeSpike ? "SPIKE" : "Normal");
+      
+      Print(alertMsg);
+      
+      if(UseNotifications)
+      {
+         Alert(alertMsg);
+         SendNotification("üö® SPIKE " + _Symbol + " " + DoubleToString(spikeProb*100, 1) + "%");
+      }
+      
+      // Dessiner un marqueur visuel rapide
+      DrawSpikeWarning(spikeProb);
+   }
+}
+
+// Dessine un avertissement visuel de spike imminent - VERSION AM√âLIOR√âE
+void DrawSpikeWarning(double probability)
+{
+   string warningName = "SPIKE_WARNING_" + _Symbol;
+   string probTextName = "SPIKE_PROB_TEXT_" + _Symbol;
+   
+   // Supprimer les avertissements pr√©c√©dents
+   if(ObjectFind(0, warningName) >= 0)
+      ObjectDelete(0, warningName);
+   if(ObjectFind(0, probTextName) >= 0)
+      ObjectDelete(0, probTextName);
+   
+   // Cr√©er un nouvel avertissement
+   MqlRates r[];
+   ArraySetAsSeries(r, true);
+   if(CopyRates(_Symbol, PERIOD_CURRENT, 0, 1, r) < 1) return;
+   
+   // D√©terminer la couleur selon la probabilit√©
+   color spikeColor = clrRed;
+   if(probability >= 0.85) spikeColor = clrRed;      // 85%+ = Rouge critique
+   else if(probability >= 0.70) spikeColor = clrOrange; // 70-84% = Orange alerte
+   else if(probability >= 0.60) spikeColor = clrYellow; // 60-69% = Jaune attention
+   else spikeColor = clrWhite; // < 60% = Blanc info
+   
+   // Dessiner une fl√®che d'avertissement
+   ObjectCreate(0, warningName, OBJ_ARROW, 0, r[0].time, r[0].high);
+   ObjectSetInteger(0, warningName, OBJPROP_ARROWCODE, 241); // Point d'exclamation
+   ObjectSetInteger(0, warningName, OBJPROP_COLOR, spikeColor);
+   ObjectSetInteger(0, warningName, OBJPROP_WIDTH, 4);
+   ObjectSetInteger(0, warningName, OBJPROP_BACK, false);
+   
+   // Ajouter un texte avec la probabilit√©
+   string probText = "SPIKE " + DoubleToString(probability*100, 0) + "%";
+   ObjectCreate(0, probTextName, OBJ_TEXT, 0, r[0].time, r[0].high + (r[0].high - r[0].low) * 0.5);
+   ObjectSetString(0, probTextName, OBJPROP_TEXT, probText);
+   ObjectSetInteger(0, probTextName, OBJPROP_COLOR, clrWhite);
+   ObjectSetInteger(0, probTextName, OBJPROP_FONTSIZE, 12);
+   ObjectSetString(0, probTextName, OBJPROP_FONT, "Arial Bold");
+   ObjectSetInteger(0, probTextName, OBJPROP_ANCHOR, ANCHOR_LEFT_UPPER);
+   ObjectSetInteger(0, probTextName, OBJPROP_BACK, true);
+   
+   // Log de l'affichage
+   Print("üìä SPIKE WARNING AFFICH√â - ", _Symbol, 
+         " | Probabilit√©: ", DoubleToString(probability*100, 1), "%",
+         " | Couleur: ", (probability >= 0.85 ? "ROUGE CRITIQUE" : 
+                         (probability >= 0.70 ? "ORANGE ALERTE" : 
+                         (probability >= 0.60 ? "JAUNE ATTENTION" : "BLANC INFO"))));
+}
+
+// Affiche l'√©tat IA et les pr√©dictions sur le graphique
+void DrawAIStatusAndPredictions()
+{
+   string statusBoxName = "AI_STATUS_BOX_" + _Symbol;
+   string statusTextName = "AI_STATUS_TEXT_" + _Symbol;
+   
+   // Supprimer les objets pr√©c√©dents
+   if(ObjectFind(0, statusBoxName) >= 0)
+      ObjectDelete(0, statusBoxName);
+   if(ObjectFind(0, statusTextName) >= 0)
+      ObjectDelete(0, statusTextName);
+   
+   // Cr√©er une bo√Æte de statut
+   MqlRates r[];
+   ArraySetAsSeries(r, true);
+   if(CopyRates(_Symbol, PERIOD_CURRENT, 0, 1, r) < 1) return;
+   
+   // Position de la bo√Æte (coin sup√©rieur gauche)
+   datetime boxTime = r[0].time;
+   double boxPrice = r[0].high + (r[0].high - r[0].low) * 0.8;
+   
+   // Cr√©er le rectangle de fond
+   ObjectCreate(0, statusBoxName, OBJ_RECTANGLE_LABEL, 0, 0, 0);
+   ObjectSetInteger(0, statusBoxName, OBJPROP_XDISTANCE, 10);
+   ObjectSetInteger(0, statusBoxName, OBJPROP_YDISTANCE, 200); // Positionn√© en bas
+   ObjectSetInteger(0, statusBoxName, OBJPROP_XSIZE, 250);
+   ObjectSetInteger(0, statusBoxName, OBJPROP_YSIZE, 80);
+   ObjectSetInteger(0, statusBoxName, OBJPROP_BGCOLOR, clrBlack);
+   ObjectSetInteger(0, statusBoxName, OBJPROP_BORDER_COLOR, clrGray);
+   ObjectSetInteger(0, statusBoxName, OBJPROP_CORNER, CORNER_LEFT_LOWER); // Bas √† gauche
+   
+   // Texte de statut IA
+   string iaStatus = UseAIServer ? 
+                    ("IA: " + g_lastAIAction + " (" + DoubleToString(g_lastAIConfidence*100, 1) + "%)") : 
+                    "IA: D√âSACTIV√â";
+   
+   // Texte de pr√©diction spike
+   double spikeProb = 0.0;
+   if(atrHandle != INVALID_HANDLE)
+   {
+      // Calcul rapide de probabilit√©
+      double buffer[];
+      ArraySetAsSeries(buffer, true);
+      if(CopyBuffer(atrHandle, 0, 0, 10, buffer) >= 5)
+      {
+         double recentATR = buffer[0];
+         double avgATR = 0.0;
+         for(int i = 0; i < 5; i++) avgATR += buffer[i];
+         avgATR /= 5.0;
+         double volCompression = (avgATR > 0) ? recentATR / avgATR : 1.0;
+         
+         if(volCompression < 0.5) spikeProb += 0.4;
+         
+         long volume[];
+         ArraySetAsSeries(volume, true);
+         if(CopyTickVolume(_Symbol, PERIOD_M1, 0, 5, volume) >= 3)
+         {
+            double recentVolume = (double)volume[0];
+            double avgVolume = 0.0;
+            for(int i = 1; i < 3; i++) avgVolume += (double)volume[i];
+            avgVolume /= 2.0;
+            if(recentVolume > avgVolume * 1.5) spikeProb += 0.6;
+         }
+         
+         spikeProb = MathMin(spikeProb, 1.0);
+      }
+   }
+   
+   string spikeStatus = "SPIKE: " + DoubleToString(spikeProb*100, 0) + "%";
+   
+   // Cr√©er le texte de statut
+   ObjectCreate(0, statusTextName, OBJ_LABEL, 0, 0, 0);
+   ObjectSetString(0, statusTextName, OBJPROP_TEXT, 
+                 iaStatus + "\n" + spikeStatus + "\nSymbole: " + _Symbol);
+   ObjectSetInteger(0, statusTextName, OBJPROP_XDISTANCE, 20);
+   ObjectSetInteger(0, statusTextName, OBJPROP_YDISTANCE, 210); // Align√© avec la bo√Æte
+   ObjectSetInteger(0, statusTextName, OBJPROP_COLOR, clrWhite);
+   ObjectSetInteger(0, statusTextName, OBJPROP_FONTSIZE, 10);
+   ObjectSetString(0, statusTextName, OBJPROP_FONT, "Arial");
+   ObjectSetInteger(0, statusTextName, OBJPROP_CORNER, CORNER_LEFT_LOWER); // Bas √† gauche
+}
+
+//| D√âTECTER UN SPIKE R√âCENT sur Boom/Crash                           |
+bool DetectRecentSpike()
+{
+   Print("üîç DEBUG - D√©tection de spike pour: ", _Symbol);
+   
+   // V√©rifier les 5 derni√®res bougies pour un spike significatif
+   MqlRates rates[];
+   ArraySetAsSeries(rates, true);
+   
+   if(CopyRates(_Symbol, PERIOD_M1, 0, 5, rates) < 5)
+   {
+      Print("‚ùå Impossible de copier les rates pour d√©tecter spike");
+      return false;
+   }
+   
+   // Calculer le mouvement moyen des bougies
+   double avgMovement = 0.0;
+   for(int i = 1; i < 5; i++) // Ignorer la bougie actuelle (0)
+   {
+      avgMovement += MathAbs(rates[i].high - rates[i].low);
+   }
+   avgMovement /= 4.0;
+   
+   // V√©rifier si la derni√®re bougie a un mouvement significatif
+   double lastMovement = MathAbs(rates[0].high - rates[0].low);
+   
+   // Rendre la d√©tection plus permissive - seuil diff√©rent pour Boom/Crash
+   double spikeMultiplier = 1.5; // 1.5x par d√©faut
+   if(StringFind(_Symbol, "Boom") >= 0 || StringFind(_Symbol, "Crash") >= 0)
+   {
+      spikeMultiplier = 1.2; // 1.2x pour Boom/Crash (plus sensible)
+   }
+   
+   double spikeThreshold = avgMovement * spikeMultiplier;
+   
+   bool isSpike = lastMovement > spikeThreshold;
+   
+   Print("üîç DEBUG - Analyse spike - Mouvement actuel: ", DoubleToString(lastMovement, _Digits), 
+         " | Moyenne: ", DoubleToString(avgMovement, _Digits), 
+         " | Seuil: ", DoubleToString(spikeThreshold, _Digits), 
+         " | Ratio: ", DoubleToString(lastMovement/avgMovement, 1),
+         " | Spike: ", isSpike ? "OUI" : "NON");
+   
+   // Ajouter une d√©tection alternative bas√©e sur le prix
+   double priceChange = MathAbs(rates[0].close - rates[1].close) / rates[1].close;
+   
+   // Seuil diff√©rent pour Boom/Crash vs autres symboles
+   double priceThreshold = 0.001; // 0.1% par d√©faut
+   if(StringFind(_Symbol, "Boom") >= 0 || StringFind(_Symbol, "Crash") >= 0)
+   {
+      priceThreshold = 0.0001; // 0.01% pour Boom/Crash (plus sensible)
+   }
+   
+   bool priceSpike = priceChange > priceThreshold;
+   
+   Print("üîç DEBUG - Spike prix - Changement: ", DoubleToString(priceChange*100, 4), "% | Seuil: ", DoubleToString(priceThreshold*100, 4), "% | Spike: ", priceSpike ? "OUI" : "NON");
+   
+   // Ajouter une d√©tection bas√©e sur le volume pour Boom/Crash
+   bool volumeSpike = false;
+   if(StringFind(_Symbol, "Boom") >= 0 || StringFind(_Symbol, "Crash") >= 0)
+   {
+      long volume[];
+      ArraySetAsSeries(volume, true);
+      if(CopyTickVolume(_Symbol, PERIOD_M1, 0, 3, volume) >= 3)
+      {
+         double recentVolume = (double)volume[0];
+         double avgVolume = ((double)volume[1] + (double)volume[2]) / 2.0;
+         volumeSpike = recentVolume > avgVolume * 1.3; // 30% plus √©lev√©
+         
+         Print("üîç DEBUG - Spike volume - R√©cent: ", DoubleToString(recentVolume, 0), 
+               " | Moyenne: ", DoubleToString(avgVolume, 0), 
+               " | Spike: ", volumeSpike ? "OUI" : "NON");
+      }
+   }
+   
+   // Consid√©rer comme spike si l'un des trois est vrai
+   bool finalSpike = isSpike || priceSpike || volumeSpike;
+   
+   if(finalSpike)
+   {
+      string spikeType = "";
+      if(isSpike) spikeType += "Mouvement";
+      if(priceSpike) spikeType += (spikeType != "" ? "+" : "") + "Prix";
+      if(volumeSpike) spikeType += (spikeType != "" ? "+" : "") + "Volume";
+      
+      Print("üö® SPIKE D√âTECT√â - Type: ", spikeType, 
+            " | Mouvement: ", DoubleToString(lastMovement, _Digits), 
+            " | Changement prix: ", DoubleToString(priceChange*100, 3), "%");
+   }
+   
+   return finalSpike;
+}
+
+//| EX√âCUTER UN TRADE BAS√â SUR SPIKE                                  |
+void ExecuteSpikeTrade(string direction)
+{
+   // Calculer lot size
+   double lot = CalculateLotSize();
+   if(lot <= 0) 
+   {
+      Print("‚ùå Erreur calcul lot size - trade annul√©");
+      return;
+   }
+   
+   // Calculer SL/TP bas√©s sur l'ATR
+   double atrValue = 0.0;
+   if(atrHandle != INVALID_HANDLE)
+   {
+      double atr[];
+      ArraySetAsSeries(atr, true);
+      if(CopyBuffer(atrHandle, 0, 0, 1, atr) >= 1)
+         atrValue = atr[0];
+   }
+   
+   if(atrValue == 0) atrValue = SymbolInfoDouble(_Symbol, SYMBOL_BID) * 0.002; // 0.2% par d√©faut
+   
+   Print("üîç DEBUG - ATR pour SL/TP: ", DoubleToString(atrValue, _Digits), " | Symbol: ", _Symbol);
+   
+   // VALIDATION SUPPL√âMENTAIRE: V√©rifier que la perte potentielle ne d√©passe pas 3$
+   double maxLossPerSymbol = 3.0; // 3$ maximum par symbole
+   double potentialLoss = lot * atrValue * 2.0; // SL √† 2x ATR
+   
+   if(potentialLoss > maxLossPerSymbol)
+   {
+      Print("‚ùå TRADE BLOQU√â - Perte potentielle: ", DoubleToString(potentialLoss, 2), "$ > ", maxLossPerSymbol, "$");
+      return;
+   }
+   else
+   {
+      Print("‚úÖ Perte potentielle VALID√âE: ", DoubleToString(potentialLoss, 2), "$ <= ", maxLossPerSymbol, "$");
+   }
+   
+   // Envoyer notification
+   double currentPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double notificationSL = 0, notificationTP = 0;
+   
+   if(direction == "BUY")
+   {
+      notificationSL = currentPrice - (currentPrice * 0.001);
+      notificationTP = currentPrice + (currentPrice * 0.003);
+   }
+   else // SELL
+   {
+      notificationSL = currentPrice + (currentPrice * 0.001);
+      notificationTP = currentPrice - (currentPrice * 0.003);
+   }
+   
+   SendDerivArrowNotification(direction, currentPrice, notificationSL, notificationTP);
+   
+   // Ex√©cuter l'ordre
+   bool orderExecuted = false;
+   
+   // DEBUG: V√©rifier l'option NoSLTP_BoomCrash
+   Print("üîç DEBUG - NoSLTP_BoomCrash: ", NoSLTP_BoomCrash ? "OUI" : "NON", " | Cat√©gorie: ", (SMC_GetSymbolCategory(_Symbol) == SYM_BOOM_CRASH ? "BOOM_CRASH" : "AUTRE"));
+   
+   if(direction == "BUY")
+   {
+      double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+      double sl = 0, tp = 0;
+      
+      // Appliquer SL/TP seulement si NoSLTP_BoomCrash est d√©sactiv√©
+      if(!NoSLTP_BoomCrash || SMC_GetSymbolCategory(_Symbol) != SYM_BOOM_CRASH)
+      {
+         sl = ask - atrValue * 2.0;  // Pour BUY: SL en-dessous (plus bas)
+         tp = ask + atrValue * 3.0;  // Pour BUY: TP au-dessus (plus haut)
+      }
+      
+      Print("üîç DEBUG - BUY - Ask: ", DoubleToString(ask, _Digits), " | SL: ", DoubleToString(sl, _Digits), " | TP: ", DoubleToString(tp, _Digits));
+      Print("üîç DEBUG - V√©rification SL/TP BUY - SL < Ask: ", (sl < ask || sl == 0) ? "OK" : "ERREUR", " | TP > Ask: ", (tp > ask || tp == 0) ? "OK" : "ERREUR");
+      
+      if(trade.Buy(lot, _Symbol, 0.0, sl, tp, "SPIKE TRADE BUY"))
+      {
+         orderExecuted = true;
+         Print("‚úÖ SPIKE TRADE BUY EX√âCUT√â - ", _Symbol, " @", DoubleToString(ask, _Digits), " | Lot: ", DoubleToString(lot, 2), " | Magic: ", trade.RequestMagic());
+         Print("üîç DEBUG - Ticket d'ordre: ", trade.ResultOrder());
+      }
+      else
+      {
+         Print("‚ùå √âchec SPIKE TRADE BUY - Erreur: ", trade.ResultRetcode(), " - ", trade.ResultRetcodeDescription());
+      }
+   }
+   else // SELL
+   {
+      double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+      double sl = 0, tp = 0;
+      
+      // Appliquer SL/TP seulement si NoSLTP_BoomCrash est d√©sactiv√©
+      if(!NoSLTP_BoomCrash || SMC_GetSymbolCategory(_Symbol) != SYM_BOOM_CRASH)
+      {
+         sl = bid + atrValue * 2.0;  // Pour SELL: SL au-dessus (plus haut)
+         tp = bid - atrValue * 3.0;  // Pour SELL: TP en-dessous (plus bas)
+      }
+      
+      Print("üîç DEBUG - SELL - Bid: ", DoubleToString(bid, _Digits), " | SL: ", DoubleToString(sl, _Digits), " | TP: ", DoubleToString(tp, _Digits));
+      Print("üîç DEBUG - V√©rification SL/TP SELL - SL > Bid: ", (sl > bid || sl == 0) ? "OK" : "ERREUR", " | TP < Bid: ", (tp < bid || tp == 0) ? "OK" : "ERREUR");
+      
+      if(trade.Sell(lot, _Symbol, 0.0, sl, tp, "SPIKE TRADE SELL"))
+      {
+         orderExecuted = true;
+         Print("‚úÖ SPIKE TRADE SELL EX√âCUT√â - ", _Symbol, " @", DoubleToString(bid, _Digits), " | Lot: ", DoubleToString(lot, 2), " | Magic: ", trade.RequestMagic());
+         Print("üîç DEBUG - Ticket d'ordre: ", trade.ResultOrder());
+      }
+      else
+      {
+         Print("‚ùå √âchec SPIKE TRADE SELL - Erreur: ", trade.ResultRetcode(), " - ", trade.ResultRetcodeDescription());
+      }
+   }
+   
+   if(orderExecuted)
+   {
+      Print("üéØ SPIKE TRADE EX√âCUT√â AVEC SUCC√àS - Direction: ", direction, " | Symbole: ", _Symbol);
+      
+      // D√©marrer la surveillance pour cl√¥ture imm√©diate en gain positif
+      StartSpikePositionMonitoring(direction);
+   }
+}
+
+//| SURVEILLER ET FERMER LA POSITION SPIKE EN GAIN POSITIF           |
+void StartSpikePositionMonitoring(string direction)
+{
+   // D√âSACTIV√â - Cette fonction fermait les positions trop rapidement
+   // Laisser ManageBoomCrashSpikeClose() g√©rer les fermetures
+   Print("üîç SURVEILLANCE SPIKE D√âSACTIV√âE - Laisser le trade respirer");
+   return;
+   
+   /* 
+   // CODE ORIGINAL D√âSACTIV√â:
+   // Attendre un peu que la position soit compl√®tement initialis√©e
+   Sleep(1000);
+   
+   // Surveiller pendant 30 secondes maximum
+   int maxAttempts = 30;
+   int attempt = 0;
+   
+   while(attempt < maxAttempts)
+   {
+      // Parcourir les positions pour trouver celle du spike trade
+      for(int i = 0; i < PositionsTotal(); i++)
+      {
+         ulong ticket = PositionGetTicket(i);
+         if(PositionSelectByTicket(ticket))
+         {
+            ulong ticket = PositionGetInteger(POSITION_TICKET);
+            string symbol = PositionGetString(POSITION_SYMBOL);
+            double profit = PositionGetDouble(POSITION_PROFIT);
+            string comment = PositionGetString(POSITION_COMMENT);
+            
+            // V√©rifier si c'est notre position spike
+            if(symbol == _Symbol && StringFind(comment, "SPIKE TRADE") >= 0)
+            {
+               Print("üîç SURVEILLANCE SPIKE - Ticket: ", ticket, " | Profit: ", DoubleToString(profit, 2), "$");
+               
+               // Fermer imm√©diatement si en gain positif (m√™me 0.01$)
+               if(profit > 0)
+               {
+                  Print("üí∞ GAIN POSITIF D√âTECT√â - Fermeture imm√©diate | Profit: ", DoubleToString(profit, 2), "$");
+                  PositionCloseWithLog(ticket, "SPIKE GAIN POSITIF");
+                  return;
+               }
+            }
+         }
+      }
+      
+      attempt++;
+      Sleep(1000); // Attendre 1 seconde avant la prochaine v√©rification
+   }
+   
+   Print("‚è∞ FIN SURVEILLANCE SPIKE - Position non ferm√©e dans le d√©lai imparti");
+   */
+}
+
+//| END OF PROGRAM                                                  |

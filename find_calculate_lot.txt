@@ -1,0 +1,28 @@
+94:double CalculateLot(double atr);
+3969:   double lot = CalculateLot(atr);
+4975:   double lotSize = CalculateLot(atr[0]);
+5258:double CalculateLot(double atr)
+7566:               double spikeLot = CalculateLot(atr[0]);
+7630:            double lotSize = CalculateLot(atr[0]);
+90:bool ExecuteTrade(ENUM_ORDER_TYPE orderType, double lotSize, double sl = 0.0, double tp = 0.0, string comment = "", bool isBoomCrash = false, bool isVol = false, bool isSpike = false);
+91:bool ExecuteTrade(ENUM_ORDER_TYPE type, double atr, double price, string comment, double lotMultiplier = 1.0, bool isSpikePriority = false);
+556:input bool   AI_AutoExecuteTrades = true;             // Exécuter automatiquement les trades IA (true = actif par défaut)
+786:bool ExecuteTradeWithRetry(ENUM_ORDER_TYPE type, double atr, double price, 
+799:      if(ExecuteTrade(type, atr, price, comment, lotMultiplier, isSpikePriority)) {
+1733:            ExecuteTrade(orderType, smcAtr, price, comment, 1.0);
+1741:   if(UseAIZoneBounceStrategy && AI_AutoExecuteTrades)
+2116:   if(!UseAIZoneBounceStrategy || !AI_AutoExecuteTrades)
+2236:         if(ExecuteTrade(ORDER_TYPE_BUY, atr[0], ask, comment, 1.0))
+2302:         if(ExecuteTrade(ORDER_TYPE_SELL, atr[0], bid, comment, 1.0))
+2335:         if(ExecuteTrade(ORDER_TYPE_SELL, atr[0], bid, comment, 1.0))
+2364:         if(ExecuteTrade(ORDER_TYPE_BUY, atr[0], ask, comment, 1.0))
+2398:   if(!UseBoomCrashZoneScalps || !AI_AutoExecuteTrades)
+2460:      if(ExecuteTrade(orderType, atr, entryPrice, "BC_ZONE_BUY_SCALP", 1.0))
+2495:      if(ExecuteTrade(orderType, atr, entryPrice, "BC_ZONE_SELL_SCALP", 1.0))
+2524:   if(!UseAIZoneBounceStrategy || !AI_AutoExecuteTrades)
+2577:         if(ExecuteTrade(ORDER_TYPE_BUY, atr[0], ask, comment, 1.0))
+2596:         if(ExecuteTrade(ORDER_TYPE_SELL, atr[0], bid, comment, 1.0))
+3224:bool ExecuteTrade(ENUM_ORDER_TYPE orderType, double lotSize, double sl = 0.0, double tp = 0.0, string comment = "", bool isBoomCrash = false, bool isVol = false, bool isSpike = false)
+3783:bool ExecuteTrade(ENUM_ORDER_TYPE type, double atr, double price, string comment, double lotMultiplier = 1.0, bool isSpikePriority = false)
+3889:      Print("⏸ ExecuteTrade: Boom 300 en cooldown jusqu'à ", TimeToString(g_boom300CooldownUntil, TIME_SECONDS));
+7631:            if(ExecuteTrade(orderType, lotSize, 0.0, 0.0, comment, false, false, true))

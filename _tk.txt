@@ -1,0 +1,97 @@
+eferBear=false
+MP	0	11:27:15.290	SMC_Universal (PainX 800,M1)	??? 2e SPIKE WINDOW | dir=SELL | post-entry PainX 800 | pause 3-5 petites M1 | fen??tre 420s
+QJ	0	11:27:15.291	SMC_Universal (PainX 800,M1)	[STRAT-ALIGN-MKT] SELL MARKET @ 116484.98 | SL=116489.13 TP=116478.76 | vn=-3 TF=M1+M5 | ticket=591272554
+MF	0	11:27:15.291	SMC_Universal (PainX 800,M1)	[BLOCK-DEBUG] GOM OK | connected=true vn=-3 verdict=PERFECT SELL MinGOM=2 SpikeTradable=true
+DI	0	11:27:15.303	SMC_Universal (PainX 400,M1)	[DOW] Server trendline: SELL p0=86744.61318 p1=8666
+====
+tral: HOLD S | verdict=PERFECT SELL | price=103086.82000 | urgent=no
+FI	0	11:27:15.396	SMC_Universal (PainX 800,M1)	[SAFE] ORDRE BLOQU? ? Spike Blink requis | PainX 800 ORDER_TYPE_BUY | fl?che Spike Blink non arm?e | 
+OM	0	11:27:15.396	SMC_Universal (PainX 800,M1)	[SMCGR] Erreur fermeture ticket #591272554 err=69550
+PS	0	11:27:15.482	SMC_Universal (FX Vol 60,M1)	[GOMG] Signal central: HOLD L | verdict=PERFECT BUY | price=36222.38000 | urgent=no
+LE	0	11:27:15.504	SMC_Universal (PainX 800,M1)	???? GOM ORIGINAL chang??: -3 | Timestamp: 12:27:1
+====
+ | setup qualifi?; attente du clignotement confirm? | GOM=2/2 connected=true entryAllowed=false M1=BEAR M5=BEAR M15=BULL priceFresh=true forecast5m=true forecastVn=2 htfSimple=false H4=BULL D1=BEAR chain=0/0/0
+CE	0	11:27:18.651	SMC_Universal (TrendX 600,M1)	??????? SL-SERVEUR SYNC PainX 800 ticket=591272554 SL???116515.01 (perte max broker $3.00)
+CG	0	11:27:18.878	SMC_Universal (FlipX 1,M1)	???? DEBUG - ManageDollarExits appel??e | MaxLossDollars: 3.0 | BoomCrashSpikeTP: 0.8
+HH	0	11:27:19.016	SMC_Universal (GainX 600,M1)	[GOMG] Signal centra
+====
+5 12:27"}
+RJ	0	11:27:20.913	SMC_Universal (FX Vol 60,M1)	[GOM-SCANNER] === Rafra?chissement serveur: PainX 600 ===
+JI	0	11:27:20.913	SMC_Universal (GainX 999,M1)	[GOM-PARSE] GainX 999 | raw='WAIT' vnRaw=0.0 ? canon='WAIT' vn=0
+EP	0	11:27:20.914	SMC_Universal (FlipX 1,M1)	[GIVEBACK] ? Registered #591272554 | GOOD/PERFECT | VerdictNum: 0
+FI	0	11:27:20.914	SMC_Universal (FlipX 1,M1)	[RECOVER] WHIPSAW d??tect??: transition #7 | Profit: -0.08$
+JJ	0	11:27:20.920	SMC_Universal (GainX 999,M1)	[GOM-POLL] ? SUCCESS for GainX%20999 | Verdict: GOOD BU
+====
+ UNCERTAIN
+IP	0	11:27:21.020	SMC_Universal (TrendX 600,M1)	OK: Candles uploaded for TrendX 600
+NN	0	11:27:21.028	SMC_Universal (PainX 600,M1)	[GOM-PARSE] PainX 600 | raw='PERFECT SELL' vnRaw=-3.0 ? canon='PERFECT SELL' vn=-3
+RP	0	11:27:21.030	SMC_Universal (FX Vol 40,M1)	[GIVEBACK] ? Registered #591272554 | GOOD/PERFECT | VerdictNum: -3
+FJ	0	11:27:21.030	SMC_Universal (FX Vol 40,M1)	[RECOVER] WHIPSAW d??tect??: transition #2 | Profit: -0.08$
+QP	0	11:27:21.030	SMC_Universal (PainX 600,M1)	[SMCGP] Projection absente du payload GOM; aucune bo
+====
+spike: 23.49
+RS	0	11:27:21.042	SMC_Universal (PainX 800,M1)	[SPIKE] DETECTE - Barre 44 | Mouvement: 23.76 | Type: CRASH
+IF	0	11:27:21.042	SMC_Universal (PainX 800,M1)	[SPIKE] DETECTE - Barre 55 | Mouvement: 39.29 | Type: CRASH
+EL	0	11:27:21.109	SMC_Universal (FlipX 2,M1)	[GIVEBACK] ? Registered #591272554 | GOOD/PERFECT | VerdictNum: 0
+CE	0	11:27:21.109	SMC_Universal (FlipX 2,M1)	[RECOVER] WHIPSAW d??tect??: transition #8 | Profit: -0.08$
+EI	0	11:27:21.150	SMC_Universal (FX Vol 40,M1)	? CHAIN PREDICTOR | Score=36.9 | ISI=1.00 | Len=0.0 | R
+====
+
+RF	0	11:27:21.682	SMC_Universal (FX Vol 60,M1)	[GOM-SCANNER] === Rafra?chissement termin? ===
+GH	0	11:27:21.968	SMC_Universal (PainX 800,M1)	[GOMG] Signal central: SELL | verdict=PERFECT SELL | price=116485.22000 | urgent=no
+RO	0	11:27:21.976	SMC_Universal (FX Vol 60,M1)	[GIVEBACK] ? Registered #591272554 | GOOD/PERFECT | VerdictNum: 3
+NE	0	11:27:21.976	SMC_Universal (FX Vol 60,M1)	[RECOVER] WHIPSAW d??tect??: transition #5 | Profit: -0.08$
+DD	0	11:27:21.978	SMC_Universal (PainX 800,M1)	[GOM-UPLOAD] Envoi candles MT5 ? ai_server pour PainX
+====
+ainX 999,M1)	[GOM-SCANNER] === Rafra?chissement termin? ===
+KH	0	11:27:22.351	SMC_Universal (PainX 800,M1)	OK: Candles uploaded for PainX 800
+CQ	0	11:27:22.375	SMC_Universal (FlipX 1,M1)	[MKT] NEUTRE: FlipX 1 | Range=4.90x ATR
+PG	0	11:27:22.384	SMC_Universal (FlipX 1,M1)	[GIVEBACK] ? Registered #591272554 | GOOD/PERFECT | VerdictNum: 0
+RJ	0	11:27:22.384	SMC_Universal (FlipX 1,M1)	[RECOVER] WHIPSAW d??tect??: transition #8 | Profit: -0.08$
+IF	0	11:27:22.396	SMC_Universal (FlipX 1,M1)	[UNIFIED] skip OFF | connected=false link=false vn=0
+EG	
+====
+IF	0	11:27:22.396	SMC_Universal (FlipX 1,M1)	[UNIFIED] skip OFF | connected=false link=false vn=0
+EG	0	11:27:22.408	SMC_Universal (TrendX 600,M1)	[FIRE] IMPULSION franche d?tect?e: TrendX 600 | Slope T=2.951250 | R?? T=0.999
+GP	0	11:27:22.430	SMC_Universal (TrendX 600,M1)	[GIVEBACK] ? Registered #591272554 | GOOD/PERFECT | VerdictNum: 0
+DM	0	11:27:22.430	SMC_Universal (TrendX 600,M1)	[RECOVER] WHIPSAW d??tect??: transition #5 | Profit: -0.08$
+QL	0	11:27:22.444	SMC_Universal (FlipX 1,M1)	[SL] SWING LOW CONFIRME - Prix: 111541.00 | Time: 2026
+====
+
+DD	0	11:27:22.444	SMC_Universal (FlipX 1,M1)	[SL] SWING LOW CONFIRME - Prix: 111539.00 | Time: 2026.10.25 09:41
+PJ	0	11:27:22.444	SMC_Universal (FlipX 1,M1)	[SL] SWING LOW CONFIRME - Prix: 111536.00 | Time: 2026.10.25 09:26
+DL	0	11:27:22.494	SMC_Universal (GainX 1200,M1)	[GIVEBACK] ? Registered #591272554 | GOOD/PERFECT | VerdictNum: 2
+LG	0	11:27:22.500	SMC_Universal (FlipX 1,M1)	? CHAIN PREDICTOR | Score=42.5 | ISI=1.00 | Len=0.0 | Regime=50.0 | Temp=50.0 | Chain=0 DN ? UNCERTAIN
+QD	0	11:27:22.500	SMC_Universal (FlipX 1,M1)	[REJECT] ORDRE
+====
+0 forecastVn=0
+OH	0	11:27:22.648	SMC_Universal (PainX 800,M1)	[GOM-SCANNER] === Rafra?chissement serveur: FX Vol 20 ===
+HF	0	11:27:22.657	SMC_Universal (PainX 800,M1)	[GOM-SCANNER] === Rafra?chissement serveur: PainX 400 ===
+MG	0	11:27:22.665	SMC_Universal (GainX 600,M1)	[GIVEBACK] ? Registered #591272554 | GOOD/PERFECT | VerdictNum: 2
+IE	0	11:27:22.670	SMC_Universal (PainX 800,M1)	[GOM-SCANNER] === Rafra?chissement termin? ===
+PQ	0	11:27:22.779	SMC_Universal (GainX 600,M1)	? CROSS-CORR SIGNAL | PainX 600 spike DOWN (4.03 ATR, il y a 3 bar
+====
+X 999,M1)	???? DEBUG - ManageDollarExits appel??e | MaxLossDollars: 3.0 | BoomCrashSpikeTP: 0.8
+PD	0	11:27:23.697	SMC_Universal (GainX 999,M1)	[GOM-POLL] ? SUCCESS for GainX%20999 | Verdict: GOOD BUY (vn=2) | Coherence: 16.7%
+IQ	0	11:27:23.704	SMC_Universal (PainX 800,M1)	[GIVEBACK] ? Registered #591272554 | GOOD/PERFECT | VerdictNum: -3
+MG	0	11:27:23.704	SMC_Universal (PainX 800,M1)	[RECOVER] WHIPSAW d??tect??: transition #3 | Profit: -0.09$
+LE	0	11:27:23.764	SMC_Universal (PainX 600,M1)	[GOMG] Signal central: HOLD S | verdict=PERFECT SELL
+====
+0	11:27:23.882	SMC_Universal (PainX 600,M1)	[MKT] NEUTRE: PainX 600 | Range=8.76x ATR
+LM	0	11:27:23.882	SMC_Universal (FX Vol 20,M1)	[UNIFIED] entr??e diff??r??e ??? verrou/capital/session bloque l'ouverture | FX Vol 20 vn=-6
+GH	0	11:27:23.892	SMC_Universal (PainX 600,M1)	[GIVEBACK] ? Registered #591272554 | GOOD/PERFECT | VerdictNum: -3
+RO	0	11:27:23.892	SMC_Universal (PainX 600,M1)	[RECOVER] WHIPSAW d??tect??: transition #4 | Profit: -0.09$
+EI	0	11:27:23.896	SMC_Universal (FlipX 1,M1)	? CHAIN PREDICTOR | Score=42.5 | ISI=1.00 | Len=0.0 | 
+====
+R | Score=68.5 | ISI=0.57 | Len=100.0 | Regime=30.0 | Temp=50.0 | Chain=7 DN ? UNCERTAIN
+NR	0	11:27:24.441	SMC_Universal (GainX 1200,M1)	[UNIFIED] entree differee - M1 cloturee n'a pas confirme BUY | niveau=SMC_FVGBOX_FVG_B_1
+GI	0	11:27:24.527	SMC_Universal (GainX 999,M1)	[GIVEBACK] ? Registered #591272554 | GOOD/PERFECT | VerdictNum: 2
+GR	0	11:27:24.530	SMC_Universal (PainX 600,M1)	[DOW-PATTERN] Forecast nok: insufficient_data
+PR	0	11:27:24.546	SMC_Universal (GainX 1200,M1)	[GOMG] OTE zone: [93637.52836 - 93680.49268] in_ote=NO
+RD	0	11:27
+====
+ Dow Overlay: BULL EP=113911.06 zone=[113910.45 - 113911.67]
+DF	0	11:27:24.675	SMC_Universal (GainX 600,M1)	[SMC-DEBUG] TV Sync vars: SetupValid=false Entry=113971.43065 SL=113939.21849184 KolaBuy=113944.29 KolaSell=113974.12
+HG	0	11:27:24.711	SMC_Universal (PainX 400,M1)	[GIVEBACK] ? Registered #591272554 | GOOD/PERFECT | VerdictNum: -3
+PE	0	11:27:24.741	SMC_Universal (FlipX 1,M1)	[GOM-SCANNER] === Rafra?chissement serveur: PainX 600 ===
+FO	0	11:27:24.749	SMC_Universal (GainX 999,M1)	? CHAIN PREDICTOR | Score=48.9 | ISI=3.94 | Len=81.5 | R

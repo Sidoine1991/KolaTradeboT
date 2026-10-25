@@ -1,0 +1,1 @@
+511:input double MaxLotPerSymbol    = 1.0;    // Lot maximum cumulé par symbole

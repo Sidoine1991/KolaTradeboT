@@ -1,0 +1,34 @@
+; Paramètres optimisés pour FlipX_4 (volatilité bidirectionnelle)
+; généré le 2026-10-17
+
+; === GÉNÉRAL ===
+InpMagicNumber=123456
+InpComment="TradBOT FlipX_4"
+
+; === GOM VERDICT ===
+UseGOMVerdictFilter=true
+MinGOMVerdictNumAbs=2
+RequireGoodPerfectAlways=true
+BlockEntryWhenAIHold=false
+
+; === RISQUE ===
+MaxLossPerTradeDollars=2.0
+GeneralGiveBackMaxPct=30.0
+GeneralGiveBackMinPeakUSD=0.50
+FirstSpikeGiveBackMaxPct=30.0
+FirstSpikeGiveBackMinPeakUSD=0.30
+
+; === SPIKE ===
+UseSecondSpikeCapture=true
+SpikeCloseMinProfitUSD=0.30
+SpikeCloseKeepPct=70.0
+
+; === TIMEFRAMES ===
+UseM1=true
+UseM5=true
+UseM15=true
+UseH1=true
+
+; === AUTRES ===
+UseStagnationTimeExit=true
+StagnationMaxAgeMinutes=5

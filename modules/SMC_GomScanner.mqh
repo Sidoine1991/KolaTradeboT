@@ -1,0 +1,741 @@
+//+------------------------------------------------------------------+
+//| SMC_GomScanner.mqh — Multi-Symbol GOM Verdict Scanner          |
+//| Scans symbols via the poller and main-dashboard fallback,       |
+//| evaluates GOM verdict + TF alignment + 5-min forecast + DOW TL  |
+//| Logs unified dashboard per symbol.                              |
+//+------------------------------------------------------------------+
+#ifndef SMC_GOM_SCANNER_MQH
+#define SMC_GOM_SCANNER_MQH
+
+#include "SMC_GOM_Pipeline.mqh"
+#include "SMC_DowTrendline.mqh"
+#include "SMC_SymbolCategory.mqh"
+#include "TMState.mqh"
+#include "TMDebug.mqh"
+
+// Entry authorization is deliberately fresher than the 10-minute dashboard
+// scan cadence. The chart symbol is refreshed by the GOM pipeline poll; other
+// symbols require a recent successful per-symbol scanner poll.
+const int GOMSCAN_MAX_ENTRY_AGE_SEC = 120;
+// FIX 2026-10-11 (stagnation entrees) : la ligne scanner du symbole du graphique
+// est une projection de l etat du pipeline chart (pollé par le pipeline lui-meme).
+const int GOMSCAN_ENTRY_AGE_SEC_CHART = 240;
+const int GOMSCAN_DATA_REFRESH_SEC = 60;
+
+// FIX 2026-10-11 : fenetre de fraicheur par role - chart 240s, autres 120s.
+int GOMSCAN_EntryAgeLimit(const string symbol)
+{
+   return (StringCompare(symbol, _Symbol, true) == 0)
+          ? GOMSCAN_ENTRY_AGE_SEC_CHART : GOMSCAN_MAX_ENTRY_AGE_SEC;
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// INPUTS (added to SMC_Universal.mq5 inputs section)
+// ═══════════════════════════════════════════════════════════════════
+/*
+input group "=== GOM SCANNER — MULTI-SYMBOL ==="
+input bool   UseGomScanner         = true;     // Activer scanner GOM multi-symbole
+input string GomScannerSymbols     = "FX Vol 20,SFX Vol 75,SFV Vol 10,PainX 1200,PainX 800,GainX 800,FXVOL,SFXVOL,SFVVOL,FLIPX,PLUSX,Boom 500 Index,Crash 500 Index"; // Symboles à scanner
+input int    GomScannerIntervalSec = 600;      // Intervalle scan (secondes) — 600 = 10 min
+input int    GomScannerMaxSymbols  = 20;       // Max symboles simultanés
+input double GomMinEquityForSpike  = 3.0;      // Equity min pour PainX/GainX/Boom/Crash ($)
+input bool   GomScannerLogDashboard = true;    // Logger dashboard unifié
+*/
+
+// ═══════════════════════════════════════════════════════════════════
+// STRUCTURES
+// ═══════════════════════════════════════════════════════════════════
+
+struct GomScannerSymbol
+{
+   string           symbol;
+   string           gomKey;
+   string           source;
+   string           lastError;
+   int              category;
+   bool             enabled;
+   bool             hasData;
+   int              verdictNum;
+   string           verdict;
+   double           coherencePct;
+   double           scoreBuy;
+   double           scoreSell;
+   int              forecast5mVerdictNum;
+   string           forecast5mVerdict;
+   string           tfM1Dir;
+   string           tfM5Dir;
+   string           tfM15Dir;
+   string           tfH1Dir;
+   string           tfH4Dir;
+   string           tfD1Dir;
+   bool             tfM1Aligned;
+   bool             tfM5Aligned;
+   bool             tfM15Aligned;
+   bool             dowTrendlineNear;
+   double           distToDowTL;
+   datetime         lastPoll;
+   datetime         lastAttempt;
+   datetime         lastLog;
+   int              failStreak;
+   bool             capitalOk;
+};
+
+GomScannerSymbol g_gomScanSymbols[];
+int              g_gomScanCount = 0;
+datetime         g_gomScannerLastRun = 0;
+bool             g_gomScannerInitialized = false;
+
+// ═══════════════════════════════════════════════════════════════════
+// HELPERS
+// ═══════════════════════════════════════════════════════════════════
+
+int GOMSCAN_ParseSymbols(string &outSymbols[])
+{
+   string symList = GomScannerSymbols;
+   if(StringLen(symList) == 0) return 0;
+
+   ArrayResize(outSymbols, 0);
+   int count = 0;
+
+   string parts[];
+   int n = StringSplit(symList, ',', parts);
+
+   for(int i = 0; i < n && count < GomScannerMaxSymbols; i++)
+   {
+      string s = parts[i];
+      StringTrimLeft(s);
+      StringTrimRight(s);
+      if(StringLen(s) == 0) continue;
+
+      if(SymbolInfoDouble(s, SYMBOL_POINT) > 0)
+      {
+         int sz = ArraySize(outSymbols);
+         ArrayResize(outSymbols, sz + 1);
+         outSymbols[sz] = s;
+         count++;
+      }
+      else
+      {
+         Print("[GOM-SCANNER] Symbole introuvable dans Market Watch: ", s);
+      }
+   }
+
+   return count;
+}
+
+bool GOMSCAN_IsSpikeSymbol(const string symbol)
+{
+   string s = symbol;
+   StringToUpper(s);
+   return (StringFind(s, "PAIN") >= 0 || StringFind(s, "GAIN") >= 0 ||
+           StringFind(s, "BOOM") >= 0 || StringFind(s, "CRASH") >= 0);
+}
+
+bool GOMSCAN_CheckCapital(const string symbol)
+{
+   if(!GOMSCAN_IsSpikeSymbol(symbol)) return true;
+   double equity = AccountInfoDouble(ACCOUNT_EQUITY);
+   return (equity >= GomMinEquityForSpike);
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// INITIALIZATION
+// ═══════════════════════════════════════════════════════════════════
+
+void GOMSCAN_Init()
+{
+   g_gomScanCount = 0;
+   ArrayResize(g_gomScanSymbols, 0);
+   g_gomScannerLastRun = 0;
+   g_gomScannerInitialized = false;
+
+   string symbols[];
+   int count = GOMSCAN_ParseSymbols(symbols);
+   bool chartSymbolIncluded = false;
+   for(int i = 0; i < count; i++)
+   {
+      if(StringCompare(symbols[i], _Symbol, true) == 0)
+      {
+         chartSymbolIncluded = true;
+         break;
+      }
+   }
+   if(!chartSymbolIncluded)
+   {
+      if(SymbolInfoDouble(_Symbol, SYMBOL_POINT) <= 0 || !SymbolSelect(_Symbol, true))
+      {
+         Print("[GOM-SCANNER] Symbole du graphique non disponible pour le scanner: ", _Symbol);
+      }
+      else
+      {
+         ArrayResize(symbols, count + 1);
+         symbols[count++] = _Symbol;
+         Print("[GOM-SCANNER] Symbole du graphique ajouté à la liste de snapshots: ", _Symbol);
+      }
+   }
+   if(count == 0)
+   {
+      Print("[GOM-SCANNER] Aucun symbole valide configuré");
+      return;
+   }
+
+   for(int i = 0; i < count; i++)
+   {
+      string s = symbols[i];
+      SymbolSelect(s, true);
+
+      GomScannerSymbol st;
+      st.symbol         = s;
+      st.gomKey         = SMCGP_ResolveGOMSym(s);
+      st.source         = "";
+      st.lastError      = "";
+      st.category       = (int)SMC_GetSymbolCategory(s);
+      st.enabled        = true;
+      st.hasData        = false;
+      st.verdictNum     = 0;
+      st.verdict        = "NO DATA";
+      st.coherencePct   = 0;
+      st.scoreBuy       = 0;
+      st.scoreSell      = 0;
+      st.forecast5mVerdictNum = 0;
+      st.forecast5mVerdict    = "";
+      st.tfM1Dir        = "";
+      st.tfM5Dir        = "";
+      st.tfM15Dir       = "";
+      st.tfH1Dir        = "";
+      st.tfH4Dir        = "";
+      st.tfD1Dir        = "";
+      st.tfM1Aligned    = false;
+      st.tfM5Aligned    = false;
+      st.tfM15Aligned   = false;
+      st.dowTrendlineNear = false;
+      st.distToDowTL    = 999;
+      st.lastPoll       = 0;
+      st.lastAttempt    = 0;
+      st.lastLog        = 0;
+      st.failStreak     = 0;
+      st.capitalOk      = GOMSCAN_CheckCapital(s);
+
+      int idx = g_gomScanCount;
+      ArrayResize(g_gomScanSymbols, idx + 1);
+      g_gomScanSymbols[idx] = st;
+      g_gomScanCount++;
+
+      Print("[GOM-SCANNER] Ajouté: ", s, " | gomKey=", st.gomKey,
+            " | cat=", st.category, " | capital=", (st.capitalOk ? "OK" : "LOW"));
+   }
+
+g_gomScannerInitialized = true;
+    Print("[GOM-SCANNER] Initialisé avec ", g_gomScanCount, " symboles, intervalle=", GomScannerIntervalSec, "s");
+    
+    // Initial dashboard draw on chart
+    if(GomScannerLogDashboard)
+       GOMSCAN_DrawChartDashboard();
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// POLL ONE SYMBOL USING THE SAME FALLBACK AS THE MAIN GOM PIPELINE
+// ═══════════════════════════════════════════════════════════════════
+
+bool GOMSCAN_PollSymbol(int idx)
+{
+   if(idx < 0 || idx >= g_gomScanCount) return false;
+
+   GomScannerSymbol st = g_gomScanSymbols[idx];
+   st.lastAttempt = TimeCurrent();
+   string chartTf = SMCGP_ChartTfLabel();
+   string srcParam = "local";
+   if(GOMVerdictSource == GOM_SRC_TRADINGVIEW) srcParam = "tv";
+   else if(GOMVerdictSource == GOM_SRC_PREDICTIVE) srcParam = "predictive";
+   string encodedSymbol = SMCGP_EncodeSym(st.gomKey);
+   string query = "/gom-verdict?symbol=" + encodedSymbol +
+                  "&chart_tf=" + chartTf + "&source=poller";
+   string body;
+   int timeout = (GOM_Timeout_ms > 0 ? GOM_Timeout_ms : AI_Timeout_ms);
+   int fastTimeout = MathMin(timeout, 4000);
+   string source = "POLLER";
+
+   bool ok = SMCGP_HttpGet(query, body, fastTimeout)
+             && (SMCGP_JsonBool(body, "ok") || StringFind(body, "\"ok\":true") >= 0);
+   if(!ok)
+   {
+      query = "/gom-kola-dashboard?symbol=" + encodedSymbol +
+              "&chart_tf=" + chartTf + "&source=" + srcParam;
+      ok = SMCGP_HttpGet(query, body, timeout)
+           && (SMCGP_JsonBool(body, "ok") || StringFind(body, "\"ok\":true") >= 0);
+      source = "DASHBOARD";
+   }
+   if(!ok && GOMVerdictSource == GOM_SRC_TRADINGVIEW)
+   {
+      query = "/gom-tableau-complete?symbol=" + encodedSymbol;
+      ok = SMCGP_HttpGet(query, body, timeout)
+           && (SMCGP_JsonBool(body, "ok") || StringFind(body, "\"ok\":true") >= 0);
+      source = "TV TABLE";
+   }
+
+   if(!ok)
+   {
+      st.failStreak++;
+      st.lastError = SMCGP_JsonString(body, "message");
+      if(StringLen(st.lastError) == 0)
+         st.lastError = "HTTP " + IntegerToString(g_smcLastHttpCode);
+      g_gomScanSymbols[idx] = st;
+      if(st.failStreak == 3 || st.failStreak % 10 == 0)
+         Print("[GOM-SCANNER] ", st.symbol, " — ", st.failStreak,
+               " échecs consécutifs; dernière source=", source,
+               " erreur=", st.lastError);
+      return false;
+   }
+
+   double effectiveVn = SMCGP_JsonDouble(body, "effective_verdict_num", -999.0);
+   if(effectiveVn > -998.0)
+   {
+      st.verdictNum = (int)MathRound(effectiveVn);
+      st.verdict = SMCGP_JsonString(body, "effective_verdict");
+      if(StringLen(st.verdict) == 0)
+         st.verdict = SMCGP_VerdictTextFromNum(st.verdictNum);
+   }
+   else
+   {
+      st.verdictNum = (int)SMCGP_JsonDouble(body, "verdict_num");
+      st.verdict = SMCGP_JsonString(body, "verdict");
+   }
+   st.coherencePct         = SMCGP_JsonDouble(body, "coherence_pct");
+   st.scoreBuy             = SMCGP_JsonDouble(body, "score_buy");
+   st.scoreSell            = SMCGP_JsonDouble(body, "score_sell");
+   st.forecast5mVerdictNum = (int)SMCGP_JsonDouble(body, "forecast_verdict_num");
+   st.forecast5mVerdict    = SMCGP_JsonString(body, "forecast_verdict");
+   if(StringLen(st.verdict) == 0)
+      st.verdict = (st.verdictNum == 0 ? "WAIT" :
+                    (st.verdictNum > 0 ? "BUY" : "SELL"));
+
+   string tf_m1_dir = SMCGP_JsonString(body, "tf_m1_dir");
+   string tf_m5_dir = SMCGP_JsonString(body, "tf_m5_dir");
+   string tf_m15_dir = SMCGP_JsonString(body, "tf_m15_dir");
+   st.tfM1Dir  = tf_m1_dir;
+   st.tfM5Dir  = tf_m5_dir;
+   st.tfM15Dir = tf_m15_dir;
+   st.tfH1Dir  = SMCGP_JsonString(body, "tf_h1_dir");
+   st.tfH4Dir  = SMCGP_JsonString(body, "tf_h4_dir");
+   st.tfD1Dir  = SMCGP_JsonString(body, "tf_d1_dir");
+   int vn = st.verdictNum;
+   st.tfM1Aligned  = (vn > 0 && tf_m1_dir == "BULL") || (vn < 0 && tf_m1_dir == "BEAR");
+   st.tfM5Aligned  = (vn > 0 && tf_m5_dir == "BULL") || (vn < 0 && tf_m5_dir == "BEAR");
+   st.tfM15Aligned = (vn > 0 && tf_m15_dir == "BULL") || (vn < 0 && tf_m15_dir == "BEAR");
+
+   if(st.symbol == _Symbol)
+   {
+      double bid = SymbolInfoDouble(st.symbol, SYMBOL_BID);
+      double point = SymbolInfoDouble(st.symbol, SYMBOL_POINT);
+      if(bid > 0 && point > 0)
+      {
+         double tlPrice = SMC_TrendLineValueAt("DOW_TL_line", TimeCurrent());
+         if(tlPrice > 0)
+         {
+            st.distToDowTL = MathAbs(bid - tlPrice) / point;
+            st.dowTrendlineNear = (st.distToDowTL < 50);
+         }
+      }
+   }
+   else
+   {
+      st.dowTrendlineNear = false;
+      st.distToDowTL = 999;
+   }
+
+   st.hasData = true;
+   st.source = source;
+   st.lastError = "";
+   st.lastPoll = TimeCurrent();
+   st.capitalOk = GOMSCAN_CheckCapital(st.symbol);
+   st.failStreak = 0;
+   g_gomScanSymbols[idx] = st;
+   return true;
+}
+
+void GOMSCAN_SyncChartSymbol()
+{
+   // FIX 2026-10-11 (chart hors liste scanner) : un graphique absent de la
+   // liste GomScannerSymbols n avait aucune ligne scanner, donc
+   // GOMSCAN_GetFreshSnapshot repondait "no exact-symbol scanner row" et
+   // SMC_FinalOpenGate vetoait chaque tentative d entree sur CE graphique
+   // (observe: FX Vol 40 vetoe alors que la liste ne contenait que FX Vol 20).
+   // La ligne du graphique est désormais auto-creee ici a chaque sync.
+   int chartIdx = -1;
+   for(int i = 0; i < g_gomScanCount; i++)
+   {
+      if(g_gomScanSymbols[i].symbol == _Symbol) { chartIdx = i; break; }
+   }
+   if(chartIdx < 0)
+   {
+      if(g_gomScanCount >= GomScannerMaxSymbols + 8) return; // garde-fou memoire
+      ArrayResize(g_gomScanSymbols, g_gomScanCount + 1);
+      chartIdx = g_gomScanCount;
+      g_gomScanCount++;
+      ZeroMemory(g_gomScanSymbols[chartIdx]);
+      g_gomScanSymbols[chartIdx].symbol = _Symbol;
+      g_gomScanSymbols[chartIdx].enabled = true;
+      g_gomScanSymbols[chartIdx].category = SMC_GetSymbolCategory(_Symbol);
+   }
+
+   {
+      GomScannerSymbol st = g_gomScanSymbols[chartIdx];
+      int ageSec = (g_smcLastGOMPoll > 0)
+                   ? (int)(TimeCurrent() - g_smcLastGOMPoll) : 1000000;
+      bool sourceError = (StringFind(g_smcGomSource, "CACHE_STALE") >= 0 ||
+                          g_smcGomSource == "NO_HTTP" ||
+                          g_smcGomSource == "WAIT_POLL" ||
+                          g_smcGomSource == "OFF");
+      // FIX 2026-10-11 (contradiction scanner/chart) : la ligne scanner du chart
+      // reflète désormais le verdict CANONIQUE du pipeline (celui des gates
+      // d execution), pas le verdict API brut. Avant, sur payload périmé le
+      // scanner forçait WAIT (api=0) tandis que le graphique affichait le
+      // verdict en cache (ex vn=-3) donc SMC_FinalOpenGate vetoait tout
+      // (snapshot differs). La fraicheur fine reste gérée par les gates internes.
+      const int ageLimitSync = GOMSCAN_EntryAgeLimit(_Symbol);
+      bool fresh = g_smcGomConnected && g_smcLastGOMPoll > 0 &&
+                   ageSec >= 0 && ageSec <= ageLimitSync &&
+                   !sourceError;
+      st.verdictNum = g_smcGomVerdictNum;
+      st.verdict = g_smcGomVerdict;
+      st.coherencePct = g_smcGomCoherence;
+      st.forecast5mVerdictNum = g_smcGomVerdictForecastNum;
+      st.forecast5mVerdict = g_smcForecast5mReady
+                             ? SMCGP_VerdictTextFromNum(g_smcGomVerdictForecastNum) : "";
+      string m1 = StringLen(g_smcTfM1DirLive) > 0 ? g_smcTfM1DirLive : g_smcTfM1Dir;
+      string m5 = g_smcTfM5Dir;
+      st.tfM1Dir = m1;
+      st.tfM5Dir = m5;
+      st.tfM15Dir = g_smcTfM15Dir;
+      st.tfH1Dir = g_smcTfH1Dir;
+      st.tfH4Dir = g_smcTfH4Dir;
+      st.tfD1Dir = g_smcTfD1Dir;
+      st.tfM1Aligned = (st.verdictNum > 0 && m1 == "BULL") ||
+                       (st.verdictNum < 0 && m1 == "BEAR");
+      st.tfM5Aligned = (st.verdictNum > 0 && m5 == "BULL") ||
+                       (st.verdictNum < 0 && m5 == "BEAR");
+      st.tfM15Aligned = (st.verdictNum > 0 && g_smcTfM15Dir == "BULL") ||
+                        (st.verdictNum < 0 && g_smcTfM15Dir == "BEAR");
+      // FIX 2026-10-11 : hasData ne dépend plus de l API brute - un payload
+      // périmé mais avec verdict canonique exploitable reste utilisable
+      // (les gates internes revalident la fraicheur de toute façon).
+      st.hasData = (g_smcLastGOMPoll > 0 && g_smcGomConnected);
+      st.source = (StringLen(g_smcGomSource) > 0) ? g_smcGomSource : "CHART";
+      st.capitalOk = GOMSCAN_CheckCapital(_Symbol);
+      st.lastPoll = g_smcLastGOMPoll;
+      st.lastAttempt = g_smcLastGOMPoll;
+      st.lastError = "";
+      if(!fresh)
+      {
+         if(!g_smcGomConnected) st.lastError = "GOM disconnected";
+         else if(g_smcLastGOMPoll <= 0) st.lastError = "no successful poll";
+         else if(ageSec < 0) st.lastError = "future poll timestamp";
+         else if(ageSec > ageLimitSync)
+            st.lastError = "stale " + IntegerToString(ageSec) + "s";
+         else if(sourceError) st.lastError = st.source;
+      }
+      if(fresh)
+      {
+         st.failStreak = 0;
+      }
+      g_gomScanSymbols[chartIdx] = st;
+      return;
+   }
+}
+
+// Return only an exact-symbol scanner row. Never substitute _Symbol globals
+// for a different market; downstream execution still contains chart-scoped
+// checks, so off-chart orders are rejected until those checks are per-symbol.
+bool GOMSCAN_GetFreshSnapshot(const string symbol, GomScannerSymbol &snapshot,
+                              string &reason)
+{
+   reason = "";
+   if(!UseGomScanner || !g_gomScannerInitialized)
+   {
+      reason = "GOM scanner disabled or not initialized";
+      return false;
+   }
+   if(StringLen(symbol) == 0)
+   {
+      reason = "empty symbol";
+      return false;
+   }
+
+   if(StringCompare(symbol, _Symbol, true) == 0)
+      GOMSCAN_SyncChartSymbol();
+
+   int idx = -1;
+   for(int i = 0; i < g_gomScanCount; i++)
+   {
+      if(StringCompare(g_gomScanSymbols[i].symbol, symbol, true) == 0)
+      {
+         idx = i;
+         break;
+      }
+   }
+   if(idx < 0)
+   {
+      reason = "no exact-symbol scanner row";
+      return false;
+   }
+
+   snapshot = g_gomScanSymbols[idx];
+   if(!snapshot.hasData || snapshot.lastPoll <= 0)
+   {
+      reason = "no successful per-symbol snapshot";
+      return false;
+   }
+   if(StringLen(snapshot.lastError) > 0)
+   {
+      reason = snapshot.lastError;
+      return false;
+   }
+
+   int ageSec = (int)(TimeCurrent() - snapshot.lastPoll);
+   if(ageSec < 0)
+   {
+      reason = "snapshot timestamp is in the future";
+      return false;
+   }
+   const int ageLimit = GOMSCAN_EntryAgeLimit(symbol);
+   if(ageSec > ageLimit)
+   {
+      reason = "stale snapshot age=" + IntegerToString(ageSec) + "s";
+      return false;
+   }
+   // FIX 2026-10-11 : pour le symbole du graphique, la ligne scanner EST l etat
+   // du pipeline chart (meme poll) - les sources cache y sont des etats reels.
+   // Les autres symboles gardent la liste noire stricte.
+   const bool isChartRow = (StringCompare(symbol, _Symbol, true) == 0);
+   if(!isChartRow &&
+      (StringLen(snapshot.source) == 0 ||
+       StringFind(snapshot.source, "CACHE_STALE") >= 0 ||
+       snapshot.source == "NO_HTTP" || snapshot.source == "WAIT_POLL" ||
+       snapshot.source == "OFF"))
+   {
+      reason = "invalid snapshot source=" + snapshot.source;
+      return false;
+   }
+   if(isChartRow && StringLen(snapshot.source) == 0)
+   {
+      reason = "invalid snapshot source=empty";
+      return false;
+   }
+   if(snapshot.verdictNum == -999)
+   {
+      reason = "invalid verdict sentinel";
+      return false;
+   }
+   return true;
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// VISUAL DASHBOARD ON CHART
+// ═══════════════════════════════════════════════════════════════════
+
+void GOMSCAN_DrawChartDashboard()
+{
+   if(!GomScannerLogDashboard) return;
+
+   GOMSCAN_SyncChartSymbol();
+   string dash = "";
+   dash += "╔══════════════════════════════════════════════════════════════════╗\n";
+   dash += "║           GOM SCANNER — LIVE DASHBOARD                            ║\n";
+   dash += "╠══════════════════════════════════════════════════════════════════╣\n";
+   dash += StringFormat("║ Last Scan: %-19s  Next in: %-3ds  Symbols: %2d   ║\n",
+                       TimeToString(g_gomScannerLastRun, TIME_MINUTES|TIME_SECONDS),
+                       (int)(GomScannerIntervalSec - (TimeCurrent() - g_gomScannerLastRun)),
+                       g_gomScanCount);
+   dash += StringFormat("║ Equity: $%-6.2f  SpikeMin: $%-4.1f  Server: %s            ║\n",
+                       AccountInfoDouble(ACCOUNT_EQUITY),
+                       GomMinEquityForSpike,
+                       (g_smcGomConnected ? "CONNECTED" : "DISCONNECTED"));
+   dash += "╠══════════════════════════════════════════════════════════════════╣\n";
+   dash += "║ SYMBOL              │ VN │ VERDICT   │ SOURCE   │ AGE  │ M1/M5     │ ALIGN    │ FCST 5m   │CAP║\n";
+   dash += "╠══════════════════════════════════════════════════════════════════╣\n";
+
+   int readyCount = 0, waitCount = 0, blockedCount = 0, freshCount = 0;
+   int freshWindowSec = GOMSCAN_MAX_ENTRY_AGE_SEC;
+
+   for(int i = 0; i < g_gomScanCount; i++)
+   {
+      GomScannerSymbol st = g_gomScanSymbols[i];
+      
+      bool fresh = st.hasData && StringLen(st.lastError) == 0 &&
+                   (TimeCurrent() - st.lastPoll <= freshWindowSec);
+      if(fresh) freshCount++;
+      
+      string tfAlign = "";
+      if(st.tfM1Aligned && st.tfM5Aligned) tfAlign = "M1↑M5 ✓";
+      else if(st.tfM5Aligned && st.tfM15Aligned) tfAlign = "M5↑M15 ✓";
+      else if(st.tfM1Aligned) tfAlign = "M1 ✓";
+      else if(st.tfM5Aligned) tfAlign = "M5 ✓";
+      else if(st.tfM15Aligned) tfAlign = "M15 ✓";
+      else tfAlign = "✗ NONE";
+      
+      string status = !st.hasData ? "NO DATA" :
+                      (StringLen(st.lastError) > 0 ? "ERR" : (fresh ? st.source : "STALE"));
+      if(StringLen(status) > 8) status = StringSubstr(status, 0, 8);
+      string age = st.hasData ? IntegerToString((int)(TimeCurrent() - st.lastPoll)) + "s" : "--";
+      if(StringLen(age) > 4) age = StringSubstr(age, 0, 4);
+      
+      string cap = st.capitalOk ? "✓" : "✗ LOW";
+      string verdictShort = st.verdict;
+      if(StringLen(verdictShort) > 9) verdictShort = StringSubstr(verdictShort, 0, 9);
+      string tfDirs = st.tfM1Dir + "/" + st.tfM5Dir;
+      if(StringLen(tfDirs) == 1) tfDirs = "—/—";
+      if(StringLen(tfDirs) > 9) tfDirs = StringSubstr(tfDirs, 0, 9);
+      string forecast = st.forecast5mVerdict;
+      if(StringLen(forecast) == 0 && st.forecast5mVerdictNum != 0)
+         forecast = SMCGP_VerdictTextFromNum(st.forecast5mVerdictNum);
+      if(StringLen(forecast) == 0) forecast = "—";
+      if(StringLen(forecast) > 9) forecast = StringSubstr(forecast, 0, 9);
+      
+      if(fresh && MathAbs(st.verdictNum) >= 2 &&
+         st.tfM1Aligned && st.tfM5Aligned && st.capitalOk)
+         readyCount++;
+      else if(!st.capitalOk) blockedCount++;
+      else if(fresh) waitCount++;
+      dash += StringFormat("║ %-18s │ %3d │ %-9s │ %-8s │ %-4s │ %-9s │ %-8s │ %-9s │ %s ║\n",
+                           st.symbol, st.hasData ? st.verdictNum : 0,
+                           st.hasData ? verdictShort : "NO DATA", status, age,
+                           tfDirs, tfAlign,
+                           st.hasData ? forecast : "NO DATA", cap);
+   }
+
+   dash += "╠══════════════════════════════════════════════════════════════════╣\n";
+   dash += StringFormat("║ READY: %2d  │ WAIT: %2d  │ BLOCKED: %2d  │ FRESH: %2d/%2d              ║\n",
+                        readyCount, waitCount, blockedCount, freshCount, g_gomScanCount);
+   dash += "╚══════════════════════════════════════════════════════════════════╝\n";
+
+   string name = "GOMSCAN_DASHBOARD";
+   if(ObjectFind(0, name) < 0 && !ObjectCreate(0, name, OBJ_LABEL, 0, 0, 0))
+   {
+      Print("[GOM-SCANNER] Impossible de créer le panneau graphique, erreur=", GetLastError());
+      return;
+   }
+   ObjectSetInteger(0, name, OBJPROP_CORNER, CORNER_RIGHT_UPPER);
+   ObjectSetInteger(0, name, OBJPROP_ANCHOR, ANCHOR_RIGHT_UPPER);
+   ObjectSetInteger(0, name, OBJPROP_XDISTANCE, 8);
+   ObjectSetInteger(0, name, OBJPROP_YDISTANCE, 20);
+   ObjectSetInteger(0, name, OBJPROP_COLOR, clrWhite);
+   ObjectSetInteger(0, name, OBJPROP_FONTSIZE, 8);
+   ObjectSetString(0, name, OBJPROP_FONT, "Consolas");
+   ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
+   ObjectSetInteger(0, name, OBJPROP_BACK, false);
+   ObjectSetString(0, name, OBJPROP_TEXT, dash);
+   ChartRedraw(0);
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// LOG UNIFIED DASHBOARD
+// ═══════════════════════════════════════════════════════════════════
+
+void GOMSCAN_LogDashboard()
+{
+   if(!GomScannerLogDashboard) return;
+   int freshWindowSec = GOMSCAN_MAX_ENTRY_AGE_SEC;
+
+   string log = "\n══════════════════════════════════════════════════════════════\n";
+   log += "       GOM SCANNER — 10-MIN UNIFIED DASHBOARD\n";
+   log += "══════════════════════════════════════════════════════════════\n";
+   log += StringFormat("Time: %s | Interval: %ds | Symbols: %d\n",
+                       TimeToString(TimeCurrent(), TIME_DATE|TIME_SECONDS),
+                       GomScannerIntervalSec, g_gomScanCount);
+   log += "────────────────────────────────────────────────────────────\n";
+
+   for(int i = 0; i < g_gomScanCount; i++)
+   {
+      GomScannerSymbol st = g_gomScanSymbols[i];
+      
+      string freshness = !st.hasData ? "NO_DATA" :
+                         (StringLen(st.lastError) > 0 ? "ERROR" :
+                          ((TimeCurrent() - st.lastPoll <= freshWindowSec) ? "FRESH" : "STALE"));
+      string capital = st.capitalOk ? "CAP_OK" : "LOW_EQ";
+      string tfAlign = "";
+      if(st.tfM1Aligned && st.tfM5Aligned) tfAlign = "M1↑M5";
+      else if(st.tfM5Aligned && st.tfM15Aligned) tfAlign = "M5↑M15";
+      else if(st.tfM1Aligned) tfAlign = "M1";
+      else if(st.tfM5Aligned) tfAlign = "M5";
+      else if(st.tfM15Aligned) tfAlign = "M15";
+      else tfAlign = "NONE";
+      
+      string dowStr = st.dowTrendlineNear ? "DOW_NEAR" : "DOW_FAR";
+      if(st.distToDowTL < 999) dowStr += "(" + DoubleToString(st.distToDowTL, 0) + "pts)";
+
+      string action = !st.hasData ? "NO_DATA" : "WAIT";
+      bool fresh = st.hasData && StringLen(st.lastError) == 0 &&
+                   (TimeCurrent() - st.lastPoll <= freshWindowSec);
+      if(fresh && st.verdictNum >= 2 && st.tfM1Aligned && st.tfM5Aligned && st.capitalOk)
+         action = "BUY_READY";
+      else if(fresh && st.verdictNum <= -2 && st.tfM1Aligned && st.tfM5Aligned && st.capitalOk)
+         action = "SELL_READY";
+      else if(fresh && st.verdictNum == 0 && GOMSCAN_IsSpikeSymbol(st.symbol) &&
+              st.tfM5Aligned && st.capitalOk)
+         action = "WAIT_BYPASS"; // Synthetic WAIT bypass
+      else if(!fresh && st.hasData)
+         action = "STALE";
+
+      log += StringFormat("%-18s | %s | vn=%3d | %s | coh=%.0f%% | TF:%-8s | 5m:%-12s | %s | %s\n",
+                          st.symbol, freshness, st.hasData ? st.verdictNum : 0,
+                          st.hasData ? st.verdict : "NO DATA", st.coherencePct,
+                          tfAlign, st.forecast5mVerdict, dowStr, action);
+   }
+
+   log += "══════════════════════════════════════════════════════════════\n";
+   Print(log);
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// MAIN SCAN FUNCTION — called from OnTimer every 10 min
+// ═══════════════════════════════════════════════════════════════════
+
+void GOMSCAN_ScanAll()
+{
+   if(!UseGomScanner) return;
+   if(!g_gomScannerInitialized) GOMSCAN_Init();
+   if(!g_gomScannerInitialized) return;
+
+   datetime now = TimeCurrent();
+   GOMSCAN_SyncChartSymbol();
+   bool fullScanDue = (now - g_gomScannerLastRun >= GomScannerIntervalSec);
+   if(fullScanDue)
+   {
+      g_gomScannerLastRun = now;
+   }
+
+   bool polledAny = false;
+   // FIX 2026-10-11 (stagnation scanner) : avant, UN SEUL symbole pollé par
+   // cycle OnTimer (1s). Sous charge serveur (polls 4-24s synchrones), un cycle
+   // complet de N symboles dépassait 300s : lignes scanner périmées (>120s)
+   // et veto permanent. Désormais jusqu a 2 polls par cycle avec budget 3s ;
+   // le symbole du graphique est exclu du polling dédié (donné par
+   // GOMSCAN_SyncChartSymbol à chaque cycle via le pipeline chart).
+   const ulong scanCycleStartMs = GetTickCount64();
+   int scannedThisCycle = 0;
+   for(int i = 0; i < g_gomScanCount; i++)
+   {
+      if(StringCompare(g_gomScanSymbols[i].symbol, _Symbol, true) == 0)
+         continue; // chart symbole: synchronisé par SyncChartSymbol ci-dessus
+      bool refreshDue = !g_gomScanSymbols[i].hasData ||
+                        now - g_gomScanSymbols[i].lastAttempt >= GOMSCAN_DATA_REFRESH_SEC;
+      if(!refreshDue) continue;
+      Print("[GOM-SCANNER] === Rafraîchissement serveur: ", g_gomScanSymbols[i].symbol, " ===");
+      GOMSCAN_PollSymbol(i);
+      polledAny = true;
+      scannedThisCycle++;
+      if(scannedThisCycle >= 2 || (GetTickCount64() - scanCycleStartMs) >= 3000)
+         break;
+   }
+
+   if(fullScanDue)
+      GOMSCAN_LogDashboard();
+
+    // Visual dashboard uses a chart object so it cannot erase the main dashboard.
+    GOMSCAN_DrawChartDashboard();
+
+   if(polledAny)
+      Print("[GOM-SCANNER] === Rafraîchissement terminé ===");
+}
+
+#endif // SMC_GOM_SCANNER_MQH

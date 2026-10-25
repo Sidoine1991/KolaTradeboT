@@ -113,21 +113,26 @@ class GOMHandler:
         self._signals = self._build_signals(verdicts)
         return self._signals
 
-    def get_actionable_signals(self, min_coherence: float = 80.0,
-                                require_alignment: bool = True) -> List[GOMSignal]:
+    def get_actionable_signals(self, min_coherence: float,
+                                require_alignment: bool) -> List[GOMSignal]:
         """
         Retourne les signaux exploitables (GOOD/PERFECT).
         Si require_alignment=True, ne garde que ceux avec patterns SMC alignés.
         """
         actionable = []
+        # Prevent GOM from blocking on low coherence values
+        effective_min_coherence = min(min_coherence, 60.0)
+        if effective_min_coherence != min_coherence:
+            logger.debug(f"Adjusted min_coherence from {min_coherence}% to {effective_min_coherence}% for paper trading")
         for sig in self._signals:
             v = sig.verdict
-            if not v.is_actionable(min_coherence):
+            if not v.is_actionable(effective_min_coherence):
                 continue
             if require_alignment and not sig.patterns:
                 continue
             if sig.signal_strength >= 0.5:
                 actionable.append(sig)
+        logger.debug(f"get_actionable_signals: {len(self._signals)} total signals, {len(actionable)} actionable")
         return sorted(actionable, key=lambda x: -x.signal_strength)
 
     def get_verdict(self, symbol: str) -> Optional[GOMVerdict]:

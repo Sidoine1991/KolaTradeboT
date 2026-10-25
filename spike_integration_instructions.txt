@@ -1,0 +1,220 @@
+INSTRUCTIONS POUR INTÉGRER LES FONCTIONS SPIKE DANS F_INX_Scalper_double.mq5
+
+======================================================================
+ERREUR ACTUELLE: function 'DetectBoomCrashSpike' must have a body
+======================================================================
+
+SOLUTION: Copiez-collez les fonctions suivantes dans votre fichier F_INX_Scalper_double.mq5
+
+EMPLACEMENT RECOMMANDÉ: Juste après la ligne 11851 (après "return false;}" de la fonction DetectBoomCrashSpikeOpportunity)
+
+FONCTIONS À COPIER:
+
+//+------------------------------------------------------------------+
+//| FONCTIONS POUR LA DÉTECTION DES SPIKES BOOM/CRASH               |
+//+------------------------------------------------------------------+
+
+//+------------------------------------------------------------------+
+//| Détecter un spike Boom/Crash en temps réel                       |
+//+------------------------------------------------------------------+
+bool DetectBoomCrashSpike()
+{
+   // Vérifier si c'est un symbole Boom/Crash
+   if(!IsBoomCrashSymbol(_Symbol))
+      return false;
+   
+   // Obtenir les prix actuels
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   double currentPrice = (bid + ask) / 2.0;
+   
+   // Initialiser le prix de référence
+   if(g_lastBoomCrashPrice == 0.0)
+   {
+      g_lastBoomCrashPrice = currentPrice;
+      return false;
+   }
+   
+   // Calculer le mouvement en pourcentage
+   double priceChange = MathAbs(currentPrice - g_lastBoomCrashPrice);
+   double priceChangePercent = (priceChange / g_lastBoomCrashPrice) * 100.0;
+   
+   // Seuil de détection de spike (différent pour Boom et Crash)
+   double spikeThreshold = 0.3; // 0.3% de mouvement
+   
+   // Détecter un spike significatif
+   if(priceChangePercent >= spikeThreshold)
+   {
+      // Déterminer la direction du spike
+      ENUM_ORDER_TYPE spikeDirection;
+      if(currentPrice > g_lastBoomCrashPrice)
+      {
+         // Spike haussier -> attendre une correction SELL
+         spikeDirection = ORDER_TYPE_SELL;
+      }
+      else
+      {
+         // Spike baissier -> attendre une correction BUY
+         spikeDirection = ORDER_TYPE_BUY;
+      }
+      
+      // Créer la flèche dynamique clignotante
+      DrawSpikeArrow(spikeDirection, currentPrice);
+      
+      // Mettre à jour le prix de référence
+      g_lastBoomCrashPrice = currentPrice;
+      
+      if(DebugMode)
+         Print("🚨 SPIKE DÉTECTÉ sur ", _Symbol, ": ", DoubleToString(priceChangePercent, 3), "% - Direction: ", EnumToString(spikeDirection));
+      
+      return true;
+   }
+   
+   // Mettre à jour le prix de référence progressivement
+   g_lastBoomCrashPrice = currentPrice;
+   
+   return false;
+}
+
+//+------------------------------------------------------------------+
+//| Dessiner une flèche dynamique clignotante pour spike             |
+//+------------------------------------------------------------------+
+void DrawSpikeArrow(ENUM_ORDER_TYPE orderType, double price)
+{
+   // Supprimer l'ancienne flèche si elle existe
+   if(g_spikeArrowName != "")
+      ObjectDelete(0, g_spikeArrowName);
+   
+   // Créer le nom de la flèche
+   g_spikeArrowName = "SPIKE_ARROW_" + _Symbol + "_" + IntegerToString(TimeCurrent());
+   g_spikeArrowTime = TimeCurrent();
+   g_spikeOrderType = orderType;
+   g_spikeArrowBlinkState = true;
+   g_lastBlinkTime = TimeCurrent();
+   
+   // Créer la flèche selon la direction
+   int arrowCode = (orderType == ORDER_TYPE_BUY) ? 233 : 234; // 233=flèche haut, 234=flèche bas
+   color arrowColor = (orderType == ORDER_TYPE_BUY) ? clrBlue : clrRed;
+   
+   if(ObjectCreate(0, g_spikeArrowName, OBJ_ARROW, 0, TimeCurrent(), price))
+   {
+      ObjectSetInteger(0, g_spikeArrowName, OBJPROP_ARROWCODE, arrowCode);
+      ObjectSetInteger(0, g_spikeArrowName, OBJPROP_COLOR, arrowColor);
+      ObjectSetInteger(0, g_spikeArrowName, OBJPROP_WIDTH, 5);
+      ObjectSetInteger(0, g_spikeArrowName, OBJPROP_BACK, false);
+      ObjectSetInteger(0, g_spikeArrowName, OBJPROP_SELECTABLE, false);
+      ObjectSetString(0, g_spikeArrowName, OBJPROP_TEXT, "SPIKE - CLICK FOR LIMIT ORDER");
+      ObjectSetInteger(0, g_spikeArrowName, OBJPROP_TIMEFRAMES, OBJ_ALL_PERIODS);
+      
+      if(DebugMode)
+         Print("🎯 Flèche de spike créée: ", g_spikeArrowName, " à ", DoubleToString(price, _Digits));
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Mettre à jour le clignotement de la flèche de spike              |
+//+------------------------------------------------------------------+
+void UpdateSpikeArrowBlink()
+{
+   // Vérifier si la flèche existe et est récente (moins de 30 secondes)
+   if(g_spikeArrowName == "" || (TimeCurrent() - g_spikeArrowTime) > 30)
+   {
+      // Supprimer la flèche si elle est trop vieille
+      if(g_spikeArrowName != "")
+      {
+         ObjectDelete(0, g_spikeArrowName);
+         g_spikeArrowName = "";
+      }
+      return;
+   }
+   
+   // Clignoter toutes les 500ms
+   if((TimeCurrent() - g_lastBlinkTime) >= 0.5)
+   {
+      g_spikeArrowBlinkState = !g_spikeArrowBlinkState;
+      g_lastBlinkTime = TimeCurrent();
+      
+      // Changer la visibilité ou la couleur pour l'effet de clignotement
+      if(ObjectFind(0, g_spikeArrowName) >= 0)
+      {
+         if(g_spikeArrowBlinkState)
+         {
+            // État visible - couleur vive
+            color arrowColor = (g_spikeOrderType == ORDER_TYPE_BUY) ? clrBlue : clrRed;
+            ObjectSetInteger(0, g_spikeArrowName, OBJPROP_COLOR, arrowColor);
+            ObjectSetInteger(0, g_spikeArrowName, OBJPROP_WIDTH, 5);
+         }
+         else
+         {
+            // État clignoté - couleur plus pâle
+            color arrowColor = (g_spikeOrderType == ORDER_TYPE_BUY) ? clrDodgerBlue : clrIndianRed;
+            ObjectSetInteger(0, g_spikeArrowName, OBJPROP_COLOR, arrowColor);
+            ObjectSetInteger(0, g_spikeArrowName, OBJPROP_WIDTH, 3);
+         }
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Placer un ordre limite lors d'un spike                           |
+//+------------------------------------------------------------------+
+void PlaceLimitOrderOnSpike(ENUM_ORDER_TYPE orderType, double spikePrice)
+{
+   // Calculer le prix d'entrée pour l'ordre limite
+   double entryPrice;
+   double sl, tp;
+   
+   if(orderType == ORDER_TYPE_BUY)
+   {
+      // Spike baissier -> ordre limite BUY en dessous du prix actuel
+      entryPrice = spikePrice * 0.998; // 0.2% en dessous du spike
+      sl = entryPrice - (StopLossUSD / SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE));
+      tp = entryPrice + (TakeProfitUSD / SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE));
+   }
+   else // ORDER_TYPE_SELL
+   {
+      // Spike haussier -> ordre limite SELL au-dessus du prix actuel
+      entryPrice = spikePrice * 1.002; // 0.2% au-dessus du spike
+      sl = entryPrice + (StopLossUSD / SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE));
+      tp = entryPrice - (TakeProfitUSD / SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE));
+   }
+   
+   // Normaliser les prix
+   entryPrice = NormalizeDouble(entryPrice, _Digits);
+   sl = NormalizeDouble(sl, _Digits);
+   tp = NormalizeDouble(tp, _Digits);
+   
+   // Placer l'ordre limite
+   trade.SetExpertMagicNumber(InpMagicNumber);
+   
+   bool success = false;
+   if(orderType == ORDER_TYPE_BUY)
+   {
+      success = trade.BuyLimit(InitialLotSize, _Symbol, entryPrice, sl, tp, "Spike BUY Limit");
+   }
+   else
+   {
+      success = trade.SellLimit(InitialLotSize, _Symbol, entryPrice, sl, tp, "Spike SELL Limit");
+   }
+   
+   if(success)
+   {
+      Print("✅ Ordre limite SPIKE placé: ", EnumToString(orderType), " à ", DoubleToString(entryPrice, _Digits));
+      Print("   SL: ", DoubleToString(sl, _Digits), " | TP: ", DoubleToString(tp, _Digits));
+      
+      // Supprimer la flèche après avoir placé l'ordre
+      if(g_spikeArrowName != "")
+      {
+         ObjectDelete(0, g_spikeArrowName);
+         g_spikeArrowName = "";
+      }
+   }
+   else
+   {
+      Print("❌ Échec ordre limite SPIKE: ", trade.ResultRetcode(), " - ", trade.ResultRetcodeDescription());
+   }
+}
+
+======================================================================
+VÉRIFICATION: Après avoir copié ces fonctions, le fichier devrait compiler sans erreur.
+======================================================================

@@ -1,0 +1,174 @@
+# Guide d'Intégration - Robot + Indicateur Boom/Crash
+
+## Configuration Complète pour Trading Automatisé
+
+### 1. Installation des Fichiers
+
+**Robot de Trading :**
+- `F_INX_robot4.mq5` → Dossier Experts
+- Compilez dans MetaEditor
+
+**Indicateur Technique :**
+- `ATR_RSI_Ichimoku_Combined.mq5` → Dossier Indicators
+- Compilez dans MetaEditor
+
+**Template de Graphique :**
+- `BoomCrash_Setup.tpl` → Dossier Templates
+
+### 2. Configuration du Robot
+
+Dans F_INX_robot4.mq5, vérifiez ces paramètres :
+```
+UseTimeFilter = false           // Trading 24h/24
+UseVolumeFilter = false         // Pas de filtre de volume
+UseNewStrategy = true           // Activer stratégie Boom/Crash
+BullishTP_Dollar = 1.0          // TP fixe $1
+MaxLotSize = 5.0                // Taille max lot
+RiskPercent = 2.0               // Risque 2% par trade
+```
+
+### 3. Configuration de l'Indicateur
+
+Paramètres optimisés pour Boom/Crash :
+```
+RSI_Period = 14
+ATR_Period = 14
+Tenkan = 9
+Kijun = 26
+SenkouB = 52
+EnableAlerts = true
+EnableSoundAlerts = true
+AlertCooldownSeconds = 30
+```
+
+### 4. Installation du Template
+
+1. Ouvrez MT5
+2. Faites un clic droit sur le graphique
+3. "Template" → "Load Template"
+4. Sélectionnez "BoomCrash_Setup.tpl"
+
+### 5. Workflow de Trading
+
+**Étape 1 : Préparation**
+- Ouvrez les graphiques Boom 1000 Index et Crash 1000 Index
+- Appliquez le template sur chaque graphique
+- Vérifiez que l'indicateur ATR_RSI_Ichimoku_Combined est actif
+
+**Étape 2 : Surveillance**
+- Surveillez les signaux (flèches jaunes)
+- Écoutez les alertes sonores
+- Vérifiez les notifications push
+
+**Étape 3 : Vérification des Signaux**
+**Pour BOOM (BUY) :**
+- RSI < 30 (survente)
+- OU croisement Tenkan > Kijun
+- OU combinaison RSI > 50 + Tenkan > Kijun
+
+**Pour CRASH (SELL) :**
+- RSI > 70 (surachat)
+- OU croisement Tenkan < Kijun
+- OU combinaison RSI < 50 + Tenkan < Kijun
+
+**Étape 4 : Activation du Robot**
+- Assurez-vous que AutoTrading est activé
+- Vérifiez que le robot F_INX_robot4 est attaché au graphique
+- Surveillez les entrées automatiques
+
+### 6. Gestion des Risques
+
+**Limites de Positions :**
+- Maximum 3 positions simultanées sur Boom/Crash
+- 1 position sur les autres symboles
+
+**Stop Loss Dynamique :**
+- Break-even automatique après profit
+- Trailing stop pour sécuriser les gains
+- Validation centralisée avec IsValidStop()
+
+**Gestion du Capital :**
+- Risque 2% par trade
+- Lot maximum 5.0
+- Stop global si drawdown > 5%
+
+### 7. Surveillance et Maintenance
+
+**Vérifications Quotidiennes :**
+- État des positions ouvertes
+- Performance du robot
+- Taux de réussite des signaux
+
+**Optimisations Hebdomadaires :**
+- Ajustement des paramètres RSI/ATR si nécessaire
+- Analyse des trades réussis/échoués
+- Mise à jour des niveaux de support/résistance
+
+### 8. Dépannage
+
+**Problèmes Communs :**
+
+*Robot ne prend pas de trades :*
+- Vérifiez UseTimeFilter = false
+- Vérifiez UseVolumeFilter = false
+- Vérifiez AutoTrading activé
+
+*Indicateur ne s'affiche pas :*
+- Recompilez l'indicateur
+- Redémarrez MT5
+- Vérifiez les erreurs dans l'onglet Experts
+
+*Alertes ne fonctionnent pas :*
+- Vérifiez EnableAlerts = true
+- Vérifiez le fichier son existe
+- Vérifiez les notifications MT5 activées
+
+### 9. Performance Attendue
+
+**Signaux par jour :**
+- Boom : 2-4 signaux d'achat
+- Crash : 2-4 signaux de vente
+- Taux de réussite attendu : 65-75%
+
+**Gains Cibles :**
+- $1.00 par trade (TP fixe)
+- 3-5 trades gagnants par jour
+- Objectif : $3-5 par jour
+
+### 10. Checklist Avant Lancement
+
+- [ ] Robot compilé et attaché
+- [ ] Indicateur installé et fonctionnel
+- [ ] Template appliqué
+- [ ] Alertes configurées
+- [ ] AutoTrading activé
+- [ ] Paramètres de risque vérifiés
+- [ ] Capital suffisant
+- [ ] Connection internet stable
+
+### 11. Monitoring en Temps Réel
+
+**Onglets à Surveiller :**
+- **Trade** : Positions ouvertes et historique
+- **Exposure** : Risque global
+- **Experts** : Messages du robot
+- **Journal** : Activité du système
+
+**Alertes Critiques :**
+- Drawdown > 5%
+- Plus de 3 positions simultanées
+- Erreurs de modification SL/TP
+- Échecs d'exécution de trades
+
+### 12. Améliorations Futures
+
+**Version 2.0 (Planifiée) :**
+- Machine Learning pour optimisation des signaux
+- Gestion multi-timeframe
+- Interface web de monitoring
+- Backtesting intégré
+
+**Feedback et Support :**
+- Documentez les performances
+- Notez les améliorations souhaitées
+- Signalez les bugs ou problèmes

@@ -24,10 +24,13 @@ log = logging.getLogger("paper_validation")
 
 # ─── Configuration Paper Trading ───
 PAPER_CONFIG = EngineConfig(
+    # Configuration Paper Trading améliorée:
+    # gom_min_coherence=40.0  # cohérence plus faible pour éviter le blocage excessif en mode paper
+    # require_pattern_alignment=False  # pas de besoin de MT5 en mode paper
     scan_interval=15.0,
-    gom_min_coherence=70.0,
-    require_pattern_alignment=True,
-    min_signal_strength=0.5,
+    gom_min_coherence=40.0,   # live GOM coherence peaks ~50% on Deriv; 70% would block every signal
+    require_pattern_alignment=False,  # chart_patterns needs MT5 candles; paper runs without a broker chart
+    min_signal_strength=0.3,  # seuil de force de signal réduit pour paper validation
     enable_auto_close=True,
     enable_auto_trade=True,  # En paper, on simule seulement
     max_spread_multiplier=3.0,
@@ -36,9 +39,9 @@ PAPER_CONFIG = EngineConfig(
     trailing_distance_pips=3.0,
     trailing_step_pips=1.0,
     dow_blocking_enabled=True,
-    dow_blocking_threshold_pips=80.0,
-    dow_blocking_threshold_coherence=70.0,
-    dow_blocking_strict_entry=True,
+    dow_blocking_threshold_pips=50.0,
+    dow_blocking_threshold_coherence=50.0,
+    dow_blocking_strict_entry=False,
 )
 
 # Seuils de validation
@@ -77,7 +80,7 @@ class PaperValidator:
                     "tp": order["tp"],
                     "ticket": order["ticket"],
                 })
-                log.info(f"📝 PAPER ORDER: {order['direction']} {order['symbol']} "
+                log.info(f"[TRADES]: {order['direction']} {order['symbol']} "
                          f"@{order['price']:.5f} SL={order['sl']:.5f} TP={order['tp']:.5f} "
                          f"Lot={order['lot']:.2f} Ticket={order['ticket']}")
 
@@ -94,7 +97,7 @@ class PaperValidator:
             else:
                 self.consecutive_losses = 0
 
-            log.info(f"🔒 PAPER CLOSE: {close['symbol']} P&L={profit:.2f}$ "
+            log.info(f"[CLOSE] PAPER CLOSE: {close['symbol']} P&L={profit:.2f}$ "
                      f"Daily P&L={self.daily_pnl:.2f}$ Consecutive losses={self.consecutive_losses}")
 
         return report
@@ -136,31 +139,31 @@ class PaperValidator:
         status = self.engine.get_status()
         thresholds = self.check_thresholds()
 
-        print("\n" + "="*60)
-        print(f"📊 PAPER VALIDATION STATUS — {datetime.now().strftime('%H:%M:%S')}")
+        print("\n" + "="*56)
+        print(f"[[VER]] PAPER VALIDATION STATUS — {datetime.now().strftime('%H:%M:%S')}")
         print("="*60)
-        print(f"⏱️  Uptime: {(time.time() - self.start_time)/60:.1f} min")
-        print(f"🔄 Cycles: {status['cycle']}")
-        print(f"📈 Daily P&L: ${self.daily_pnl:.2f}")
-        print(f"📝 Total trades: {len(self.trades)}")
-        print(f"❌ Losses today: {self.losses_today}")
+        print(f"[TIME]  Uptime: {(time.time() - self.start_time)/60:.1f} min")
+        print(f"[CYCLES] Cycles: {status['cycle']}")
+        print(f"[P&L] Daily P&L: ${self.daily_pnl:.2f}")
+        print(f"[TRADES] Total trades: {len(self.trades)}")
+        print(f"[FAIL] Losses today: {self.losses_today}")
         print(f"🔁 Consecutive losses: {self.consecutive_losses}")
-        print(f"🎯 Active signals: {len(status['active_signals'])}")
-        print(f"📍 Active positions: {len(status['active_positions'])}")
+        print(f"[SIGNALS] Active signals: {len(status['active_signals'])}")
+        print(f"[POSITIONS] Active positions: {len(status['active_positions'])}")
 
-        print("\n📋 SEUILS DE VALIDATION:")
+        print("\n[VAL] SEUILS DE VALIDATION:")
         for key, value in thresholds.items():
             if isinstance(value, bool):
-                icon = "✅" if value else "❌"
+                icon = "[OK]" if value else "[FAIL]"
                 label = key.replace("_ok", "").replace("_", " ").title()
                 print(f"   {icon} {label}: {'PASS' if value else 'FAIL'}")
             elif isinstance(value, float):
                 label = key.replace("_", " ").title()
-                print(f"   📊 {label}: {value:.2f}")
+                print(f"   [[VER]] {label}: {value:.2f}")
 
         # Dow blocking status
         dow = status["config"].get("dow_blocking", {})
-        print(f"\n🛡️  DOW BLOCKING: enabled={dow.get('enabled')}, "
+        print(f"\n[DOW]  DOW BLOCKING: enabled={dow.get('enabled')}, "
               f"threshold_pips={dow.get('threshold_pips')}, "
               f"threshold_coherence={dow.get('threshold_coherence')}")
 
@@ -169,18 +172,19 @@ class PaperValidator:
         return all(v for k, v in thresholds.items() if isinstance(v, bool) and k.endswith("_ok"))
 
 def main():
-    print("🚀 DÉMARRAGE PAPER VALIDATION TradBOT")
+    print("[DÉMARRAGE PAPER VALIDATION TradBOT")
     print("="*60)
     print("Configuration:")
     print(f"  - Scan interval: {PAPER_CONFIG.scan_interval}s")
-    print(f"  - GOM min coherence: {PAPER_CONFIG.gom_min_coherence}%")
+    print(f"  - GOM min coherence: {PAPER_CONFIG.gom_min_coherence}% (adjusted for live GOM ~50%)")
+    print(f"  - Pattern alignment: disabled (no MT5 candles in paper mode)")
     print(f"  - Dow blocking: {PAPER_CONFIG.dow_blocking_enabled} "
           f"(pips={PAPER_CONFIG.dow_blocking_threshold_pips}, "
-          f"coherence={PAPER_CONFIG.dow_blocking_threshold_coherence}%)")
+          f"coherence={PAPER_CONFIG.dow_blocking_threshold_coherence}%, strict={PAPER_CONFIG.dow_blocking_strict_entry})")
     print(f"  - Auto trade: {PAPER_CONFIG.enable_auto_trade}")
     print(f"  - Auto close: {PAPER_CONFIG.enable_auto_close}")
     print("="*60)
-    print("⚠️  MODE PAPER — Aucune vraie ordre n'est envoyée au broker")
+    print("[WARN]  MODE PAPER — Aucune vraie ordre n'est envoyée au broker")
     print("   Surveillez les logs pour valider la logique d'entrée")
     print("="*60 + "\n")
 
@@ -197,22 +201,22 @@ def main():
             if cycle % 10 == 0:
                 all_ok = validator.print_status()
                 if not all_ok:
-                    log.warning("⚠️  SEUILS NON RESPECTÉS — Vérification requise")
+                    log.warning("[WARN]  SEUILS NON RESPECTÉS — Vérification requise")
 
             # Arrêt d'urgence si perte journalière critique
             if validator.daily_pnl <= -VALIDATION_THRESHOLDS["max_daily_loss_usd"]:
-                log.error(f"🛑 ARRÊT D'URGENCE: Perte journalière ${validator.daily_pnl:.2f} "
+                log.error(f"[STOP] ARRÊT D'URGENCE: Perte journalière ${validator.daily_pnl:.2f} "
                           f"≥ ${VALIDATION_THRESHOLDS['max_daily_loss_usd']}")
                 break
 
             time.sleep(PAPER_CONFIG.scan_interval)
 
     except KeyboardInterrupt:
-        print("\n🛑 Arrêt demandé par l'utilisateur")
+        print("\n[STOP] Arrêt demandé par l'utilisateur")
     finally:
         validator.engine.stop()
         validator.print_status()
-        print("📝 Validation terminée")
+        print("[TRADES] Validation terminée")
 
 if __name__ == "__main__":
     main()

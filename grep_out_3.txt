@@ -1,0 +1,17 @@
+353: void DrawPredictionChannel();
+354: void DrawFutureCandlesM1();
+355: bool FetchFutureCandlesM1Hybrid(bool forceRefresh = false);
+356: bool FetchFutureCandlesFromServer(int horizon);
+5350: if(ShowPredictionChannel) DrawPredictionChannel();
+5351: if(ShowFutureCandlesM1) DrawFutureCandlesM1();
+9889: void DrawPredictionChannel()
+9895: DrawPredictionChannelLines();
+9897: DrawPredictionChannelLabel("Canal ML: chargement...");
+9936: DrawPredictionChannelLines();
+10161: bool FetchFutureCandlesFromServer(int horizon)
+10452: bool FetchFutureCandlesM1Hybrid(bool forceRefresh = false)
+10460: bool okServer = FetchFutureCandlesFromServer(horizon);
+10480: void DrawFutureCandlesM1()
+10493: if(!FetchFutureCandlesM1Hybrid(false)) return;
+10589: void DrawPredictionChannelLines()
+10659: void DrawPredictionChannelLabel(string text)

@@ -1,0 +1,97 @@
+1:1:// ... [contenu existant jusqu'à la fonction UpdateWinCounter] ...
+2:2:
+3:3://+------------------------------------------------------------------+
+4:4://| Met à jour le compteur de gains et gère le cooldown             |
+5:5://+------------------------------------------------------------------+
+6:6:void UpdateWinCounter(double profit)
+7:7:{
+8:8:   if(profit > 0)
+9:9:   {
+10:10:      g_consecutiveWins++;
+11:11:      g_lastWinTime = TimeCurrent();
+12:12:      Print("🎯 Gain enregistré. Série de gains: ", g_consecutiveWins);
+13:13:      
+14:14:      // Vérifier si on est sur le Boom 300 Index
+15:15:      bool isBoom300 = (StringFind(_Symbol, "Boom 300") >= 0);
+16:16:      
+17:17:      // Démarrer le cooldown après 2 gains consécutifs
+18:18:      if(g_consecutiveWins >= g_requiredWinsForCooldown)
+19:19:      {
+20:20:         g_winCooldownUntil = TimeCurrent() + (g_winCooldownMinutes * 60);
+21:21:         Print("⏸️ Cooldown de ", g_winCooldownMinutes, 
+22:22:               " minutes après ", g_consecutiveWins, " gains consécutifs.");
+23:23:               
+24:24:         // Si c'est le Boom 300 Index et qu'on a 2 gains consécutifs, on active une pause de 5 minutes
+25:25:         if(isBoom300 && g_consecutiveWins == 2)
+26:26:         {
+27:27:            g_winStreakPauseUntil = TimeCurrent() + (5 * 60); // 5 minutes de pause
+28:28:            Print("⏸️ Pause de 5 minutes activée après 2 gains consécutifs sur Boom 300 Index");
+29:29:         }
+30:30:      }
+31:31:   }
+32:32:   else if(profit < 0)
+33:33:   {
+34:34:      // Réinitialiser le compteur en cas de perte
+35:35:      if(g_consecutiveWins > 0)
+36:36:      {
+37:37:         Print("🔄 Réinitialisation du compteur de gains après une perte");
+38:38:         g_consecutiveWins = 0;
+39:39:         
+40:40:         // Si c'est le Boom 300 Index, on réinitialise aussi la pause
+41:41:         if(g_winStreakPauseUntil > 0 && StringFind(_Symbol, "Boom 300") >= 0)
+42:42:         {
+43:43:            g_winStreakPauseUntil = 0;
+44:44:            Print("🔄 Réinitialisation de la pause après gains consécutifs (suite à une perte)");
+45:45:         }
+46:46:      }
+47:47:   }
+48:48:}
+49:49:
+50:50:// ... [contenu existant jusqu'à la fonction IsTradingAllowed] ...
+51:51:
+52:52://+------------------------------------------------------------------+
+53:53://| Vérifie les conditions de trading                               |
+54:54://+------------------------------------------------------------------+
+55:55:bool IsTradingAllowed()
+56:56:{
+57:57:   // Vérifier les objectifs quotidiens
+58:58:   if(IsDailyTargetReached())
+59:59:      return false;
+60:60:      
+61:61:   // Vérifier les pertes consécutives sur ce symbole
+62:62:   if(!CanTradeSymbolAfterLoss(_Symbol))
+63:63:      return false;
+64:64:
+65:65:   // Vérifier la limite de perte quotidienne
+66:66:   if(IsDailyLossLimitReached())
+67:67:   {
+68:68:      if(GetTickCount() % 60000 < 1000) // Afficher une fois par minute max
+69:69:         Print("❌ Limite de perte quotidienne atteinte: ", g_dailyLoss, " ", AccountInfoString(ACCOUNT_CURRENCY));
+70:70:      return false;
+71:71:   }
+72:72:   
+73:73:   // Vérifier le nombre de pertes consécutives
+74:74:   if(g_consecutiveLosses >= MaxConsecLosses && MaxConsecLosses > 0)
+75:75:   {
+76:76:      if(GetTickCount() % 60000 < 1000) // Afficher une fois par minute max
+77:77:         Print("⚠️ Arrêt après ", g_consecutiveLosses, " pertes consécutives");
+78:78:      return false;
+79:79:   }
+80:80:   
+81:81:   // Vérifier les pertes consécutives (fonction existante)
+82:82:   if(!CanTradeAfterLosses())
+83:83:      return false;
+84:84:      
+85:85:   // Vérifier la pause après 2 gains consécutifs sur le Boom 300 Index
+86:86:   if(StringFind(_Symbol, "Boom 300") >= 0 && TimeCurrent() < g_winStreakPauseUntil)
+87:87:   {
+88:88:      int remaining = (int)(g_winStreakPauseUntil - TimeCurrent()) / 60;
+89:89:      if(GetTickCount() % 60000 < 1000) // Afficher une fois par minute max
+90:90:         Print("⏸️ Pause active après 2 gains consécutifs sur Boom 300 Index. Reprise dans ", remaining, " minutes");
+91:91:      return false;
+92:92:   }
+93:93:      
+94:94:   return true;
+95:95:}
+96:96:
+97:97:// ... [reste du contenu existant] ...

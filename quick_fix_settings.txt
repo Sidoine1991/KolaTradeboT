@@ -1,0 +1,17 @@
+// CORRECTIONS RAPIDES - SMC_Universal.mq5
+// A appliquer dans les inputs de l'EA
+
+// 1. REDUIRE LES SEUILS POUR PLUS D'OPPORTUNITES
+MinSetupScoreEntry = 55.0        // 65.0 -> 55.0
+MinAIConfidencePercent = 55.0    // 65.0 -> 55.0
+
+// 2. ACTIVER LE MODE TREND STAIRCASE
+UseStaircaseTrendMode = true       // Deja active
+
+// 3. PARAMETRES GRAPHIQUES
+ShowChartGraphics = true          // Deja active
+ShowSMCChannelsMultiTF = true    // Deja active
+
+// 4. MODES SPECIAUX
+UltraLightMode = false           // Deja desactive
+BlockAllTrades = false           // Deja desactive

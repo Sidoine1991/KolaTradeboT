@@ -1,0 +1,76 @@
+702:            if(trade.PositionClose(ticket))
+1447:                trade.PositionClose(ticket);
+1491:               trade.SetExpertMagicNumber(InpMagicNumber);
+1492:               if(trade.PositionClose(ticket))
+1539:            if(trade.PositionClose(ticket))
+1662:         if(trade.PositionClose(ticket))
+1696:         if(trade.PositionClose(ticket))
+1782:   trade.SetExpertMagicNumber(InpMagicNumber);
+1783:   trade.SetDeviationInPoints(InpSlippage);
+1788:      if(trade.Buy(lotSize, symbol, 0, sl, tp, "Signal d'achat - Spike détecté"))
+1800:      if(trade.Sell(lotSize, symbol, 0, sl, tp, "Signal de vente - Spike détecté"))
+2392:   trade.SetExpertMagicNumber(InpMagicNumber);
+2393:   trade.SetDeviationInPoints(InpSlippage);
+2394:   trade.SetTypeFilling(ORDER_FILLING_FOK);
+2398:      result = trade.Buy(lotSize, symbol, price, sl, tp, "M1 Scalp Boom");
+2400:      result = trade.Sell(lotSize, symbol, price, sl, tp, "M1 Scalp Crash");
+2432:            trade.PositionClose(ticket);
+2440:            trade.PositionClose(ticket);
+2590:            trade.PositionClose(ticket);
+4231:         trade.SetExpertMagicNumber(InpMagicNumber);
+4246:         bool ok = (dir>0) ? trade.Buy(immediateLot, _Symbol, 0, useSL, useTP, "Predictive BUY")
+4247:                           : trade.Sell(immediateLot, _Symbol, 0, useSL, useTP, "Predictive SELL");
+4250:            PrintFormat("? Échec trade prédictif auto: err=%d %s", GetLastError(), trade.ResultComment());
+4788:         Print("? Permissions OK - Tentative d'exécution du trade...");
+6281:   trade.SetExpertMagicNumber(InpMagicNumber);
+6282:   trade.SetDeviationInPoints(InpSlippage);
+6284:   if(trade.OrderSend(request, result))
+8104:            trade.OrderDelete(ticket);
+8318:            if(trade.OrderDelete(ticket))
+8325:               PrintFormat("? Erreur lors de la suppression de l'ordre limit #%d: %s", ticket, trade.ResultComment());
+8541:   trade.SetExpertMagicNumber(InpMagicNumber);
+8542:   trade.SetDeviationInPoints(InpSlippage);
+8550:      success = trade.Buy(lotSize, symbol, 0, sl, tp, comment);
+8554:      success = trade.Sell(lotSize, symbol, 0, sl, tp, comment);
+8559:      ulong ticket = trade.ResultOrder();
+8569:                  tradeType, symbol, GetLastError(), trade.ResultComment());
+8646:   trade.SetExpertMagicNumber(InpMagicNumber);
+8647:   trade.SetDeviationInPoints(InpSlippage);
+8718:            if(trade.BuyLimit(lotPerOrder, limitPrice, symbol, orderSL, orderTP, ORDER_TIME_GTC, 0, comment + "BUY_L" + IntegerToString(i+1)))
+8725:               Print("? Échec ordre limite BUY ", i+1, ". Erreur: ", GetLastError(), " - ", trade.ResultComment());
+8762:            if(trade.SellLimit(lotPerOrder, limitPrice, symbol, orderSL, orderTP, ORDER_TIME_GTC, 0, comment + "SELL_L" + IntegerToString(i+1)))
+8769:               Print("? Échec ordre limite SELL ", i+1, ". Erreur: ", GetLastError(), " - ", trade.ResultComment());
+8796:               ok = trade.Buy(immediateLot, symbol, 0, sl, tp, comment + "BUY_IMMEDIATE_M5");
+8800:               ok = trade.Sell(immediateLot, symbol, 0, sl, tp, comment + "SELL_IMMEDIATE_M5");
+8810:               Print("?? Échec ordre immédiat M5. Erreur: ", GetLastError(), " - ", trade.ResultComment());
+8841:               ok = trade.Buy(immediateLot, symbol, 0, sl, tp, comment + "BUY_IMMEDIATE");
+8845:               ok = trade.Sell(immediateLot, symbol, 0, sl, tp, comment + "SELL_IMMEDIATE");
+8855:               Print("?? Échec ordre immédiat. Erreur: ", GetLastError(), " - ", trade.ResultComment());
+8876:         ok = trade.Buy(lotPerOrder, symbol, 0, sl, tp, comment + "BUY");
+8880:         ok = trade.Sell(lotPerOrder, symbol, 0, sl, tp, comment + "SELL");
+8885:         Print("? Échec de l'ordre. Erreur: ", GetLastError(), " - ", trade.ResultComment());
+8997:         if(!trade.BuyLimit(lot, limitPrice, _Symbol, sl, tp, ORDER_TIME_GTC, 0, "SMC Buy Limit"))
+9000:                  " - ", trade.ResultComment());
+9012:         if(!trade.Buy(lot, _Symbol, 0, sl, tp, "SMC Buy Signal"))
+9015:                  " - ", trade.ResultComment());
+9030:         if(!trade.SellLimit(lot, limitPrice, _Symbol, sl, tp, ORDER_TIME_GTC, 0, "SMC Sell Limit"))
+9033:                  " - ", trade.ResultComment());
+9045:         if(!trade.Sell(lot, _Symbol, 0, sl, tp, "SMC Sell Signal"))
+9048:                  " - ", trade.ResultComment());
+9109:   trade.SetExpertMagicNumber(InpMagicNumber);
+9112:      ok = trade.Buy(lot, _Symbol, price, sl, tp, "FxPro_PRED_BUY");
+9114:      ok = trade.Sell(lot, _Symbol, price, sl, tp, "FxPro_PRED_SELL");
+9137:      ok = trade.BuyLimit(limit_lot, limit_price1, _Symbol, sl, tp, 
+9146:      ok = trade.BuyLimit(limit_lot, limit_price2, _Symbol, sl, tp, 
+9157:      ok = trade.SellLimit(limit_lot, limit_price1, _Symbol, sl, tp, 
+9166:      ok = trade.SellLimit(limit_lot, limit_price2, _Symbol, sl, tp, 
+9207:                     trade.OrderDelete(ord_ticket);
+9310:         if(trade.PositionClose(ticket))
+9346:            if(trade.PositionModify(ticket, new_sl, cur_tp))
+9358:            if(trade.PositionModify(ticket, new_sl, cur_tp))
+9372:            if(trade.PositionModify(ticket, cur_sl, new_tp))
+9383:            if(trade.PositionModify(ticket, cur_sl, new_tp))
+10113:                        tradeResult = trade.Buy(lotSize, symbol, 0, sl, tp, "Auto EMA10 BUY");
+10117:                        tradeResult = trade.Sell(lotSize, symbol, 0, sl, tp, "Auto EMA10 SELL");
+10123:                                    symbol, (tradeDirection > 0 ? "BUY" : "SELL"), trade.ResultOrder());
+10132:                                   GetLastError(), trade.ResultComment());

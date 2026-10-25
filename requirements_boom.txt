@@ -1,0 +1,52 @@
+# Requirements pour le Système Boom Rising Channel Predictor
+# Installation: pip install -r requirements_boom.txt
+
+# Interface utilisateur
+streamlit>=1.28.0
+plotly>=5.17.0
+
+# Traitement des données
+pandas>=2.0.0
+numpy>=1.24.0
+
+# Graphiques et visualisation
+matplotlib>=3.7.0
+seaborn>=0.12.0
+
+# Trading et MT5
+MetaTrader5>=5.0.0
+
+# Utilitaires
+python-dateutil>=2.8.0
+pytz>=2023.3
+
+# Configuration et logs
+pyyaml>=6.0
+colorama>=0.4.6
+
+# Tests (optionnel)
+pytest>=7.4.0
+pytest-cov>=4.1.0
+
+# Performance (optionnel)
+numba>=0.58.0
+cython>=3.0.0
+
+# Machine Learning (optionnel)
+scikit-learn>=1.3.0
+scipy>=1.11.0
+
+# Notifications (optionnel)
+requests>=2.31.0
+twilio>=8.5.0
+
+# Base de données (optionnel)
+sqlite3
+sqlalchemy>=2.0.0
+
+# Sécurité (optionnel)
+cryptography>=41.0.0
+
+# Monitoring (optionnel)
+psutil>=5.9.0
+memory-profiler>=0.61.0

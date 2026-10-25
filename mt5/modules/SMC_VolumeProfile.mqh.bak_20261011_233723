@@ -1,0 +1,260 @@
+//+------------------------------------------------------------------+
+//| SMC_VolumeProfile.mqh — Profil de volume / POC temps réel       |
+//| FIX v1.46: histogramme VERTICAL bord droit + POC + Value Area   |
+//| 70% + gate anti-correction (pas d'entrée DANS la zone d'oscil-  |
+//| lation: BUY au-dessus de VAH, SELL sous VAL) + confirmation     |
+//| structurelle optionnelle au POC.                                 |
+//+------------------------------------------------------------------+
+#ifndef SMC_VOLUME_PROFILE_MQH
+#define SMC_VOLUME_PROFILE_MQH
+
+input group "=== VOLUME PROFILE / POC (v1.46) ==="
+input bool   UseVolumeProfile     = true;   // Activer profil de volume + POC
+input int    VP_LookbackBars      = 180;    // Bougies M1 analysées (30 min d'historique à 180)
+input int    VP_PriceBins         = 40;     // Nombre de tranches de prix (lignes de l'histogramme)
+input double VP_ValueAreaPct      = 70.0;   // Value Area (% du volume cumulé)
+input int    VP_RefreshSec        = 10;     // Rafraîchissement dessin (secondes)
+input int    VP_MaxHistBars       = 25;     // Largeur max d'une barre d'histogramme (pixels)
+input bool   VP_BlockInValueArea  = true;   // GATE: interdire entrée dans la Value Area
+input bool   VP_RequirePOCConfirm = false;  // Confirmation obligatoire du côté du POC avant entrée
+input double VP_POCMarginPts      = 30;     // Marge autour du POC (points) pour la confirmation
+input bool   VP_DrawHistogram     = true;   // Dessiner l'histogramme vertical à droite
+input bool   VP_DrawValueArea     = true;   // Encadrer la Value Area (VAH/VAL)
+input color  VP_ColorHist         = C'38,70,110';  // Couleur des barres hors VA
+input color  VP_ColorVA           = C'70,110,38';  // Couleur des barres dans la VA
+input color  VP_ColorPOC          = clrGold;       // Couleur POC
+
+// — État calculé (par chart) —
+double g_vpPocPrice = 0.0, g_vpVah = 0.0, g_vpVal = 0.0;
+datetime g_vpLastCalc = 0;
+
+const string VP_PFX = "SMC_VP_";
+
+// Calcule POC + VAH/VAL sur les N dernières bougies M1.
+void VP_CalcProfile()
+{
+   MqlRates r[];
+   ArraySetAsSeries(r, true);
+   int n = CopyRates(_Symbol, PERIOD_M1, 0, VP_LookbackBars, r);
+   if(n < 20) return;
+
+   double lo = r[0].low, hi = r[0].high;
+   for(int i = 1; i < n; i++)
+   {
+      if(r[i].low < lo)  lo = r[i].low;
+      if(r[i].high > hi) hi = r[i].high;
+   }
+   if(hi <= lo) return;
+
+   int bins = MathMax(10, VP_PriceBins);
+   double step = (hi - lo) / bins;
+   long vol[];
+   ArrayResize(vol, bins);
+   ArrayInitialize(vol, 0);
+
+   for(int i = 0; i < n; i++)
+   {
+      long v = (long)r[i].tick_volume;
+      // Répartition du volume de la bougie sur les tranches couvertes
+      int bLo = (int)((r[i].low  - lo) / step);
+      int bHi = (int)((r[i].high - lo) / step);
+      if(bLo < 0) bLo = 0;
+      if(bHi >= bins) bHi = bins - 1;
+      if(bHi < bLo) bHi = bLo;
+      int span = bHi - bLo + 1;
+      for(int b = bLo; b <= bHi; b++)
+         vol[b] += (long)(v / span);
+   }
+
+   // POC = tranche au volume max ; VA = expansion 70% depuis le POC
+   int pocBin = 0;
+   for(int b = 1; b < bins; b++) if(vol[b] > vol[pocBin]) pocBin = b;
+
+   double targetVol = 0, totalVol = 0;
+   for(int b = 0; b < bins; b++) totalVol += (double)vol[b];
+   targetVol = totalVol * (VP_ValueAreaPct / 100.0);
+
+   int vaLoBin = pocBin, vaHiBin = pocBin;
+   double acc = (double)vol[pocBin];
+   bool tookLo = true;
+   while(acc < targetVol && (vaLoBin > 0 || vaHiBin < bins - 1))
+   {
+      double vLo = (vaLoBin > 0)        ? (double)vol[vaLoBin - 1] : -1;
+      double vHi = (vaHiBin < bins - 1) ? (double)vol[vaHiBin + 1] : -1;
+      if(vLo >= vHi && vaLoBin > 0)      { vaLoBin--; acc += vLo; }
+      else if(vaHiBin < bins - 1)        { vaHiBin++; acc += vHi; }
+      else break;
+   }
+
+   g_vpPocPrice = lo + (pocBin + 0.5) * step;
+   g_vpVah      = lo + (vaHiBin + 1.0) * step;
+   g_vpVal      = lo + vaLoBin * step;
+   g_vpLastCalc = TimeCurrent();
+}
+
+// ── Dessin: histogramme vertical sur le bord droit ──
+void VP_DrawProfile()
+{
+   if(!UseVolumeProfile || !VP_DrawHistogram) return;
+   if(g_vpLastCalc == 0) return;
+
+   MqlRates r[];
+   ArraySetAsSeries(r, true);
+   int n = CopyRates(_Symbol, PERIOD_M1, 0, VP_LookbackBars, r);
+   if(n < 20) return;
+
+   double lo = r[0].low, hi = r[0].high;
+   for(int i = 1; i < n; i++)
+   {
+      if(r[i].low < lo)  lo = r[i].low;
+      if(r[i].high > hi) hi = r[i].high;
+   }
+   if(hi <= lo) return;
+   int bins = MathMax(10, VP_PriceBins);
+   double step = (hi - lo) / bins;
+
+   for(int i = 0; i < 220; i++) { ObjectDelete(0, VP_PFX + "B" + (string)i); ObjectDelete(0, VP_PFX + "L" + (string)i); }
+
+   // Largeur commune: barre max normalisée
+   long vol[]; ArrayResize(vol, bins); ArrayInitialize(vol, 0);
+   for(int i = 0; i < n; i++)
+   {
+      long v = (long)r[i].tick_volume;
+      int bLo = (int)MathFloor((r[i].low  - lo) / step); if(bLo < 0) bLo = 0;
+      int bHi = (int)MathFloor((r[i].high - lo) / step); if(bHi >= bins) bHi = bins - 1;
+      int span = bHi - bLo + 1;
+      for(int b = bLo; b <= bHi; b++) vol[b] += (long)(v / span);
+   }
+   long vMax = 0;
+   for(int b = 0; b < bins; b++) if(vol[b] > vMax) vMax = vol[b];
+   if(vMax <= 0) return;
+
+   // Présentation: bande de ~90px à droite (PRV = pixels droits virtuels)
+   int barMaxPx = VP_MaxHistBars;
+   for(int b = 0; b < bins; b++)
+   {
+      if(vol[b] <= 0) continue;
+      int px = (int)((double)vol[b] / vMax * barMaxPx);
+      double pLo = lo + b * step, pHi = lo + (b + 1) * step;
+      datetime t0 = TimeCurrent() + PeriodSeconds() * (b % 2); // ancre droite (à l'est du prix)
+      string nm = VP_PFX + "B" + (string)b;
+      if(ObjectFind(0, nm) < 0)
+      {
+         ObjectCreate(0, nm, OBJ_RECTANGLE, 0, t0, pLo, t0, pHi);
+         ObjectSetInteger(0, nm, OBJPROP_BACK, false);
+         ObjectSetInteger(0, nm, OBJPROP_SELECTABLE, false);
+         ObjectSetInteger(0, nm, OBJPROP_FILL, true);
+      }
+      ObjectSetInteger(0, nm, OBJPROP_TIME, 0, t0);
+      ObjectSetInteger(0, nm, OBJPROP_TIME, 1, t0);
+      ObjectSetDouble(0, nm, OBJPROP_PRICE, 0, pLo);
+      ObjectSetDouble(0, nm, OBJPROP_PRICE, 1, pHi);
+
+      bool inVA = (pLo >= g_vpVal && pHi <= g_vpVah);
+      ObjectSetInteger(0, nm, OBJPROP_COLOR, inVA ? VP_ColorVA : VP_ColorHist);
+   }
+
+   // POC: ligne dorée + label
+   string pocName = VP_PFX + "POC";
+   if(ObjectFind(0, pocName) < 0)
+   {
+      ObjectCreate(0, pocName, OBJ_TREND, 0, TimeCurrent(), g_vpPocPrice, TimeCurrent(), g_vpPocPrice);
+      ObjectSetInteger(0, pocName, OBJPROP_SELECTABLE, false);
+      ObjectSetInteger(0, pocName, OBJPROP_RAY_RIGHT, true);
+      ObjectSetInteger(0, pocName, OBJPROP_WIDTH, 2);
+   }
+   ObjectSetInteger(0, pocName, OBJPROP_COLOR, VP_ColorPOC);
+   ObjectMove(0, pocName, 0, TimeCurrent(), g_vpPocPrice);
+   ObjectMove(0, pocName, 1, TimeCurrent() + PeriodSeconds() * 20, g_vpPocPrice);
+
+   if(VP_DrawValueArea)
+   {
+      string vaN = VP_PFX + "VAH", vaS = VP_PFX + "VAL";
+      datetime tA = TimeCurrent(), tB = TimeCurrent() + PeriodSeconds() * 20;
+      if(ObjectFind(0, vaN) < 0) { ObjectCreate(0, vaN, OBJ_TREND, 0, tA, g_vpVah, tB, g_vpVah); ObjectSetInteger(0, vaN, OBJPROP_SELECTABLE, false); ObjectSetInteger(0, vaN, OBJPROP_STYLE, STYLE_DOT); ObjectSetInteger(0, vaN, OBJPROP_RAY_RIGHT, true); }
+      if(ObjectFind(0, vaS) < 0) { ObjectCreate(0, vaS, OBJ_TREND, 0, tA, g_vpVal, tB, g_vpVal); ObjectSetInteger(0, vaS, OBJPROP_SELECTABLE, false); ObjectSetInteger(0, vaS, OBJPROP_STYLE, STYLE_DOT); ObjectSetInteger(0, vaS, OBJPROP_RAY_RIGHT, true); }
+      ObjectSetInteger(0, vaN, OBJPROP_COLOR, VP_ColorVA);
+      ObjectSetInteger(0, vaS, OBJPROP_COLOR, VP_ColorVA);
+      ObjectMove(0, vaN, 0, tA, g_vpVah); ObjectMove(0, vaN, 1, tB, g_vpVah);
+      ObjectMove(0, vaS, 0, tA, g_vpVal); ObjectMove(0, vaS, 1, tB, g_vpVal);
+   }
+   ChartRedraw(0);
+}
+
+// ── TICK du module (calcul + dessin throtté) ──
+void VP_OnTimerTick()
+{
+   if(!UseVolumeProfile) return;
+   static datetime s_lastCalc = 0, s_lastDraw = 0;
+   datetime now = TimeCurrent();
+   if(now - s_lastCalc >= MathMax(5, VP_RefreshSec)) { s_lastCalc = now; VP_CalcProfile(); }
+   if(now - s_lastDraw >= MathMax(5, VP_RefreshSec)) { s_lastDraw = now; VP_DrawProfile(); }
+}
+
+// ── GATE de confirmation finale (appelé par SMC_FinalOpenGate ou CPA) ──
+// Retourne true si l'entrée est autorisée côté profil de volume.
+bool SMC_VP_EntryGateOK(const string symbol, const int dirSign)
+{
+   if(!UseVolumeProfile || !VP_BlockInValueArea) return true;
+   // FIX v1.47 (demande trader): les verdicts rebels GOOD/PERFECT (|vn|>=2)
+   // passent la Value Area gate — la zone d'oscillation bloque seulement les
+   // verdicts faibles (SIMPLE/wait) qui n'ont pas assez de conviction + les
+   // entrées locales sans verdict serveur fort.
+   if(MathAbs(g_smcGomVerdictNum) >= 2)
+   {
+      static datetime s_vpBypassLog = 0;
+      if(TimeCurrent() - s_vpBypassLog >= 60)
+      {
+         s_vpBypassLog = TimeCurrent();
+         Print("🟢 VP-GATE bypass — verdict GOOD/PERFECT (vn=", g_smcGomVerdictNum, ") traverse la Value Area ", symbol);
+      }
+      return true;
+   }
+   if(symbol != _Symbol || g_vpLastCalc == 0) return true; // pas de données: ne pas bloquer aveuglément
+   double bid = SymbolInfoDouble(symbol, SYMBOL_BID);
+   if(bid <= 0) return true;
+
+   int dirInt = (dirSign > 0) ? 1 : -1;
+   if(dirInt > 0 && bid <= g_vpVah)
+   {
+      static datetime s_vavBuyLog = 0;
+      if(TimeCurrent() - s_vavBuyLog >= 30)
+      {
+         s_vavBuyLog = TimeCurrent();
+         Print("⛔ VP-GATE — BUY refusé ", symbol, ": prix ", DoubleToString(bid, (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS)),
+               " dans la Value Area [", DoubleToString(g_vpVal, 5), " - ", DoubleToString(g_vpVah, 5), "] (zone d'oscillation/correction)");
+      }
+      return false;
+   }
+   if(dirInt < 0 && bid >= g_vpVal)
+   {
+      static datetime s_vavSellLog = 0;
+      if(TimeCurrent() - s_vavSellLog >= 30)
+      {
+         s_vavSellLog = TimeCurrent();
+         Print("⛔ VP-GATE — SELL refusé ", symbol, ": prix ", DoubleToString(bid, (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS)),
+               " dans la Value Area [", DoubleToString(g_vpVal, 5), " - ", DoubleToString(g_vpVah, 5), "]");
+      }
+      return false;
+   }
+
+   // Confirmation optionnelle POC: le prix doit avoir quitté la marge du POC dans le sens du trade
+   if(VP_RequirePOCConfirm)
+   {
+      double margin = VP_POCMarginPts * SymbolInfoDouble(symbol, SYMBOL_POINT);
+      if(dirInt > 0 && bid < g_vpPocPrice + margin)   return false;
+      if(dirInt < 0 && bid > g_vpPocPrice - margin)   return false;
+   }
+   return true;
+}
+
+void VP_Cleanup()
+{
+   for(int i = 0; i < 220; i++) { ObjectDelete(0, VP_PFX + "B" + (string)i); ObjectDelete(0, VP_PFX + "L" + (string)i); }
+   ObjectDelete(0, VP_PFX + "POC");
+   ObjectDelete(0, VP_PFX + "VAH");
+   ObjectDelete(0, VP_PFX + "VAL");
+}
+
+// v1.47: GOOD/PERFECT traverse la Value Area.
+#endif // SMC_VOLUME_PROFILE_MQH

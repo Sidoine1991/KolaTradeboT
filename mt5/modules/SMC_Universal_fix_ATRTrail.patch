@@ -1,0 +1,36 @@
+--- /mnt/user-data/uploads/SMC_Universal.mq5	2026-08-03 19:33:58.610014000 +0000
++++ SMC_Universal.mq5	2026-08-03 19:58:51.012138395 +0000
+@@ -2075,6 +2075,18 @@
+ input bool   ScannerUseWhatsApp    = true;   // Notifications WhatsApp
+ input bool   ScannerUseATRTrail    = true;   // Trailing ATR sur trades scanner
+ input double ScannerLimitATRThresh = 0.5;    // Seuil ATR pour LIMIT (0.5 = proche trendline)
++// --- FIX 2026-08-03 (Claude/Kola): ces 6 paramètres pilotent ATRTRAIL_ManageAll()
++//     (modules/AtrTrailingStop.mqh). Ils n'étaient QUE des champs de struct (TMConfig),
++//     jamais reliés à un input ni assignés -> valaient 0.0 par défaut au runtime.
++//     Consequence: phase BE se déclenchait dès profitATR>=0 et la phase "aggressive"
++//     collait le SL au prix courant (ATR*0 = 0 de distance), écrasant tous les
++//     SL/TP calculés par IMPULSE/GOM-ALIGN/RSI-SQUEEZE/etc. avant même d'approcher le TP.
++input int    ScannerATRTrailPeriod      = 14;   // Période ATR pour le trailing (barres)
++input double ScannerATRTrailBETrigger   = 1.0;  // Passage au breakeven dès profit >= X * ATR
++input double ScannerATRTrailAggressive  = 1.5;  // Trail serré dès profit >= X * ATR
++input double ScannerATRTrailConservative= 2.5;  // Trail large dès profit >= X * ATR
++input double ScannerATRTrailAggrDist    = 0.5;  // Distance du trail serré (X * ATR)
++input double ScannerATRTrailConsDist    = 1.0;  // Distance du trail large (X * ATR)
+ 
+ //=== GLOBALES SUPPLÉMENTAIRES PIPELINE GOM ===
+ int    g_dailyTargetHit     = 0;      // Joker cible journalière atteinte
+@@ -2965,6 +2977,14 @@
+        g_state.config.useWhatsApp2 = ScannerUseWhatsApp;
+        g_state.config.useATRTrail = ScannerUseATRTrail;
+        g_state.config.limitATRThreshold = ScannerLimitATRThresh;
++       // FIX 2026-08-03: ces 6 champs existaient dans TMConfig mais n'étaient jamais
++       // assignés -> valaient 0.0/0, ce qui rendait le trailing ATR beaucoup trop agressif.
++       g_state.config.atrTrailPeriod       = ScannerATRTrailPeriod;
++       g_state.config.atrTrailBETrigger    = ScannerATRTrailBETrigger;
++       g_state.config.atrTrailAggressive   = ScannerATRTrailAggressive;
++       g_state.config.atrTrailConservative = ScannerATRTrailConservative;
++       g_state.config.atrTrailAggrDist     = ScannerATRTrailAggrDist;
++       g_state.config.atrTrailConsDist     = ScannerATRTrailConsDist;
+ 
+        DOWSCAN_Init();
+        ADAPTIVE_Init();

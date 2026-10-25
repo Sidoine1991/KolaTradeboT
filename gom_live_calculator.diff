@@ -1,0 +1,28 @@
+--- /mnt/user-data/uploads/gom_live_calculator.py	2026-08-06 17:18:58.694730000 +0000
++++ gom_live_calculator.py	2026-08-06 21:53:21.514771207 +0000
+@@ -734,10 +734,24 @@
+         record["source"] = "live_calculation"
+         record["data_source"] = self._candle_source_for(symbol, used_tf)
+ 
++        # FIX-DISCORDANCE-01 : le contexte M1 (bars_since_spike, price_direction_5b,
++        # m1_opp_bars) doit exister AVANT enrich_record(), car apply_price_reality_gate()
++        # est appelé en toute dernière étape D'ENRICH_RECORD et s'appuie sur ces champs.
++        # Avant ce fix, enrich_record() tournait en premier → ce gate voyait des
++        # défauts vides (bars=-1, opp=0) et ne pouvait donc JAMAIS corriger un verdict
++        # figé/périmé lors de sa première évaluation → verdict en désaccord avec le
++        # prix réel M1 tant qu'un recalcul externe ne repassait pas dessus.
+         if self.pine:
+-            record = self.pine.enrich_record(record)
++            self.pine._apply_asset_profile(record)
++            self.pine._normalize_spike_flags(record)
++            score_buy, score_sell = self.pine.calculate_scores(record)
++            record["score_buy"], record["score_sell"] = score_buy, score_sell
+ 
+         self._enrich_m1_price_context(symbol, record, broker=broker)
++
++        if self.pine:
++            record = self.pine.enrich_record(record)
++
+         record["ok"] = True
+         return record
+ 

@@ -1,0 +1,205 @@
+count mid=5162
+11:40:23|| MaxLossDollars: 3.0 | BoomCrashSpikeTP: 0.8
+KG	0	11:40:23.018	SMC_Universal (PainX 800,M1)	???? DEBUG - Position analys??e - PainX 800 | Profit: -2.43$ | Ticket: 591272554 | Cat??gorie: BOOM_CRASH | ??ge: 788s
+CS	0	11:40:23.065	S
+11:40:24|
+LR	0	11:40:24.198	SMC_Universal (FlipX 1,M1)	???? DEBUG - Position analys??e - PainX 800 | Profit: -2.43$ | Ticket: 591272554 | Cat??gorie: BOOM_CRASH | ??ge: 789s
+DK	0	11:40:24.427	S
+11:40:25|K	0	11:40:25.333	SMC_Universal (PainX 400,M1)	???? DEBUG - Position analys??e - PainX 800 | Profit: -2.43$ | Ticket: 591272554 | Cat??gorie: BOOM_CRASH | ??ge: 790s
+NN	0	11:40:25.542	S
+11:40:25|	0	11:40:25.691	SMC_Universal (GainX 1200,M1)	???? DEBUG - Position analys??e - PainX 800 | Profit: -2.44$ | Ticket: 591272554 | Cat??gorie: BOOM_CRASH | ??ge: 791s
+EJ	0	11:40:25.691	S
+11:40:26|	0	11:40:26.626	SMC_Universal (SFX Vol 20,M1)	???? DEBUG - Position analys??e - PainX 800 | Profit: -2.44$ | Ticket: 591272554 | Cat??gorie: BOOM_CRASH | ??ge: 792s
+QD	0	11:40:26.653	S
+11:40:26|
+GP	0	11:40:26.653	SMC_Universal (FlipX 1,M1)	???? DEBUG - Position analys??e - PainX 800 | Profit: -2.44$ | Ticket: 591272554 | Cat??gorie: BOOM_CRASH | ??ge: 792s
+OS	0	11:40:26.683	S
+11:40:27|	0	11:40:27.546	SMC_Universal (TrendX 600,M1)	???? DEBUG - Position analys??e - PainX 800 | Profit: -2.44$ | Ticket: 591272554 | Cat??gorie: BOOM_CRASH | ??ge: 793s
+MS	0	11:40:27.694	S
+11:40:29|
+PE	0	11:40:29.396	SMC_Universal (FlipX 2,M1)	???? DEBUG - Position analys??e - PainX 800 | Profit: -2.45$ | Ticket: 591272554 | Cat??gorie: BOOM_CRASH | ??ge: 794s
+MK	0	11:40:29.406	S
+11:40:29|
+EN	0	11:40:29.406	SMC_Universal (FlipX 1,M1)	???? DEBUG - Position analys??e - PainX 800 | Profit: -2.45$ | Ticket: 591272554 | Cat??gorie: BOOM_CRASH | ??ge: 794s
+NL	0	11:40:29.407	S
+11:40:31|H	0	11:40:31.299	SMC_Universal (FX Vol 20,M1)	???? DEBUG - Position analys??e - PainX 800 | Profit: -2.45$ | Ticket: 591272554 | Cat??gorie: BOOM_CRASH | ??ge: 796s
+KE	0	11:40:31.347	S
+11:40:33|
+GL	0	11:40:33.242	SMC_Universal (FlipX 1,M1)	???? DEBUG - Position analys??e - PainX 800 | Profit: -2.46$ | Ticket: 591272554 | Cat??gorie: BOOM_CRASH | ??ge: 798s
+KS	0	11:40:33.306	S
+11:40:33|
+RI	0	11:40:33.729	SMC_Universal (FlipX 1,M1)	???? DEBUG - Position analys??e - PainX 800 | Profit: -2.46$ | Ticket: 591272554 | Cat??gorie: BOOM_CRASH | ??ge: 799s
+JR	0	11:40:33.798	S
+11:40:35|R	0	11:40:35.411	SMC_Universal (GainX 600,M1)	???? DEBUG - Position analys??e - PainX 800 | Profit: -2.46$ | Ticket: 591272554 | Cat??gorie: BOOM_CRASH | ??ge: 800s
+QE	0	11:40:35.412	S
+11:40:36|
+NJ	0	11:40:36.151	SMC_Universal (FlipX 2,M1)	???? DEBUG - Position analys??e - PainX 800 | Profit: -2.47$ | Ticket: 591272554 | Cat??gorie: BOOM_CRASH | ??ge: 801s
+DL	0	11:40:36.237	S
+11:40:38|L	0	11:40:38.294	SMC_Universal (GainX 800,M1)	???? DEBUG - Position analys??e - PainX 800 | Profit: -2.47$ | Ticket: 591272554 | Cat??gorie: BOOM_CRASH | ??ge: 803s
+FQ	0	11:40:38.653	S
+11:40:38|[DOW-PATTERN] Forecast nok: insufficient_data
+DG	0	11:40:38.988	SMC_Universal (PainX 800,M1)	[DOW] Server trendline: SELL p0=116467.76837 p1=116502.85177 slope=0.011244679460875116 proj=116437.83424 broken=false
+MR	0	11:40:38.989	S
+11:40:38|e | PainX 800 | verdict GOM WAIT ou absent | 
+MG	0	11:40:38.989	SMC_Universal (PainX 800,M1)	[SMCGR] Erreur fermeture ticket #591272554 err=69550
+LI	0	11:40:39.019	S
+11:40:39|X 1200 timeframe=PERIOD_M5 response= headers=
+FP	0	11:40:39.206	SMC_Universal (PainX 800,M1)	? Pattern Override - Weak GOM overridden by strong BUY patterns
+RF	0	11:40:39.222	S
+11:40:39|
+JJ	0	11:40:39.436	SMC_Universal (FlipX 1,M1)	???? DEBUG - Position analys??e - PainX 800 | Profit: -2.48$ | Ticket: 591272554 | Cat??gorie: BOOM_CRASH | ??ge: 804s
+OI	0	11:40:39.470	S
+11:40:39|F	0	11:40:39.736	SMC_Universal (FX Vol 40,M1)	???? DEBUG - Position analys??e - PainX 800 | Profit: -2.48$ | Ticket: 591272554 | Cat??gorie: BOOM_CRASH | ??ge: 805s
+IG	0	11:40:39.737	S
+11:40:40|ishOk=false preferBull=false preferBear=false
+GJ	0	11:40:40.004	SMC_Universal (PainX 800,M1)	[UNIFIED-INIT] build=20261024-dowML | UnifiedGOMEntryMode=true BlockAllTrades=false symbol=PainX 800 vn=0 srv=0
+FO	0	11:40:40.004	S
+11:40:40|ckAllTrades=false symbol=PainX 800 vn=0 srv=0
+FO	0	11:40:40.004	SMC_Universal (PainX 800,M1)	[UNIFIED] skip SIMPLE | vn=0 min=1 synthAuto=true
+EJ	0	11:40:40.091	S
+11:40:40|| MaxLossDollars: 3.0 | BoomCrashSpikeTP: 0.8
+IN	0	11:40:40.461	SMC_Universal (PainX 800,M1)	???? DEBUG - Position analys??e - PainX 800 | Profit: -2.48$ | Ticket: 591272554 | Cat??gorie: BOOM_CRASH | ??ge: 805s
+EL	0	11:40:40.461	S
+11:40:40|
+NI	0	11:40:40.550	SMC_Universal (FlipX 2,M1)	???? DEBUG - Position analys??e - PainX 800 | Profit: -2.48$ | Ticket: 591272554 | Cat??gorie: BOOM_CRASH | ??ge: 806s
+QI	0	11:40:40.550	S
+11:40:40|S	0	11:40:40.550	SMC_Universal (GainX 600,M1)	???? DEBUG - Position analys??e - PainX 800 | Profit: -2.48$ | Ticket: 591272554 | Cat??gorie: BOOM_CRASH | ??ge: 806s
+NR	0	11:40:40.562	S
+11:40:40|	0	11:40:40.687	SMC_Universal (GainX 1200,M1)	???? DEBUG - Position analys??e - PainX 800 | Profit: -2.48$ | Ticket: 591272554 | Cat??gorie: BOOM_CRASH | ??ge: 806s
+PK	0	11:40:40.705	S
+11:40:40|? - verdict WAIT | vn=0 srv=0 chainLead=false
+CQ	0	11:40:40.915	SMC_Universal (PainX 800,M1)	[SMCCT] Dow Overlay: WAIT EP=116509.51 zone=[116508.89 - 116510.12]
+IK	0	11:40:40.917	S
+11:40:40|AIT EP=116509.51 zone=[116508.89 - 116510.12]
+IK	0	11:40:40.917	SMC_Universal (PainX 800,M1)	[SMC-DEBUG] TV Sync vars: SetupValid=true Entry=116433.54 SL=116416.76544143999 KolaBuy=116433.54 KolaSell=116507.76
+CQ	0	11:40:40.930	S
+11:40:41|	0	11:40:41.404	SMC_Universal (TrendX 600,M1)	???? DEBUG - Position analys??e - PainX 800 | Profit: -2.48$ | Ticket: 591272554 | Cat??gorie: BOOM_CRASH | ??ge: 806s
+KI	0	11:40:41.416	S
+11:40:41|E	0	11:40:41.543	SMC_Universal (PainX 600,M1)	???? DEBUG - Position analys??e - PainX 800 | Profit: -2.48$ | Ticket: 591272554 | Cat??gorie: BOOM_CRASH | ??ge: 807s
+GD	0	11:40:41.543	S
+11:40:42|
+DS	0	11:40:42.029	SMC_Universal (FlipX 2,M1)	???? DEBUG - Position analys??e - PainX 800 | Profit: -2.48$ | Ticket: 591272554 | Cat??gorie: BOOM_CRASH | ??ge: 807s
+NK	0	11:40:42.118	S
+11:40:42|GOM-SCANNER] === Rafra?chissement termin? ===
+LM	0	11:40:42.442	SMC_Universal (PainX 800,M1)	???? DEBUG - Position analys??e - PainX 800 | Profit: -2.48$ | Ticket: 591272554 | Cat??gorie: BOOM_CRASH | ??ge: 807s
+QQ	0	11:40:42.445	S
+11:40:42|	0	11:40:42.445	SMC_Universal (TrendX 600,M1)	???? DEBUG - Position analys??e - PainX 800 | Profit: -2.48$ | Ticket: 591272554 | Cat??gorie: BOOM_CRASH | ??ge: 807s
+CI	0	11:40:42.473	S
+11:40:42|G	0	11:40:42.725	SMC_Universal (GainX 999,M1)	???? DEBUG - Position analys??e - PainX 800 | Profit: -2.49$ | Ticket: 591272554 | Cat??gorie: BOOM_CRASH | ??ge: 808s
+NI	0	11:40:42.725	S
+11:40:42|
+GP	0	11:40:42.954	SMC_Universal (FlipX 2,M1)	???? DEBUG - Position analys??e - PainX 800 | Profit: -2.49$ | Ticket: 591272554 | Cat??gorie: BOOM_CRASH | ??ge: 808s
+QI	0	11:40:43.017	S
+11:40:43|H	0	11:40:43.046	SMC_Universal (FX Vol 60,M1)	???? DEBUG - Position analys??e - PainX 800 | Profit: -2.49$ | Ticket: 591272554 | Cat??gorie: BOOM_CRASH | ??ge: 808s
+JS	0	11:40:43.048	S
+11:40:43|O	0	11:40:43.236	SMC_Universal (FX Vol 20,M1)	???? DEBUG - Position analys??e - PainX 800 | Profit: -2.49$ | Ticket: 591272554 | Cat??gorie: BOOM_CRASH | ??ge: 808s
+FP	0	11:40:43.236	S
+11:40:43|P	0	11:40:43.592	SMC_Universal (FX Vol 40,M1)	???? DEBUG - Position analys??e - PainX 800 | Profit: -2.49$ | Ticket: 591272554 | Cat??gorie: BOOM_CRASH | ??ge: 809s
+FN	0	11:40:43.592	S
+11:40:43|	0	11:40:43.592	SMC_Universal (GainX 1200,M1)	???? DEBUG - Position analys??e - PainX 800 | Profit: -2.49$ | Ticket: 591272554 | Cat??gorie: BOOM_CRASH | ??ge: 809s
+IS	0	11:40:43.592	S
+11:40:44|
+RJ	0	11:40:44.299	SMC_Universal (FlipX 2,M1)	???? DEBUG - Position analys??e - PainX 800 | Profit: -2.49$ | Ticket: 591272554 | Cat??gorie: BOOM_CRASH | ??ge: 809s
+HQ	0	11:40:44.417	S
+11:40:44|O	0	11:40:44.971	SMC_Universal (GainX 400,M1)	???? DEBUG - Position analys??e - PainX 800 | Profit: -2.49$ | Ticket: 591272554 | Cat??gorie: BOOM_CRASH | ??ge: 810s
+DQ	0	11:40:44.972	S
+11:40:45|
+ED	0	11:40:45.427	SMC_Universal (FlipX 1,M1)	???? DEBUG - Position analys??e - PainX 800 | Profit: -2.49$ | Ticket: 591272554 | Cat??gorie: BOOM_CRASH | ??ge: 810s
+PK	0	11:40:45.430	S
+11:40:45|
+QQ	0	11:40:45.784	SMC_Universal (FlipX 2,M1)	???? DEBUG - Position analys??e - PainX 800 | Profit: -2.50$ | Ticket: 591272554 | Cat??gorie: BOOM_CRASH | ??ge: 811s
+OR	0	11:40:45.931	S
+11:40:45|N	0	11:40:45.931	SMC_Universal (PainX 600,M1)	???? DEBUG - Position analys??e - PainX 800 | Profit: -2.50$ | Ticket: 591272554 | Cat??gorie: BOOM_CRASH | ??ge: 811s
+RF	0	11:40:46.031	S
+11:40:46|S	0	11:40:46.165	SMC_Universal (FX Vol 20,M1)	???? DEBUG - Position analys??e - PainX 800 | Profit: -2.50$ | Ticket: 591272554 | Cat??gorie: BOOM_CRASH | ??ge: 811s
+FS	0	11:40:46.405	S
+11:40:47|L	0	11:40:47.638	SMC_Universal (GainX 999,M1)	???? DEBUG - Position analys??e - PainX 800 | Profit: -2.50$ | Ticket: 591272554 | Cat??gorie: BOOM_CRASH | ??ge: 813s
+QM	0	11:40:47.712	S
+11:40:50|	0	11:40:50.963	SMC_Universal (GainX 1200,M1)	???? DEBUG - Position analys??e - PainX 800 | Profit: -2.51$ | Ticket: 591272554 | Cat??gorie: BOOM_CRASH | ??ge: 816s
+IE	0	11:40:51.041	S
+11:40:51|
+MG	0	11:40:51.444	SMC_Universal (PainX 1200,M1)	[TradeJournal] WIN BOOM_CRASH PainX 800 SELL net=1.58$
+RG	0	11:40:51.446	S
+11:40:51|
+EI	0	11:40:51.456	SMC_Universal (PainX 1200,M1)	[TradeJournal] LOSS BOOM_CRASH PainX 800 SELL net=-1.11$
+IG	0	11:40:51.459	S
+11:40:54|K	0	11:40:54.088	SMC_Universal (GainX 400,M1)	???? DEBUG - Position analys??e - PainX 800 | Profit: -2.52$ | Ticket: 591272554 | Cat??gorie: BOOM_CRASH | ??ge: 819s
+EM	0	11:40:54.134	S
+11:40:54|
+EJ	0	11:40:54.846	SMC_Universal (FlipX 1,M1)	???? DEBUG - Position analys??e - PainX 800 | Profit: -2.52$ | Ticket: 591272554 | Cat??gorie: BOOM_CRASH | ??ge: 820s
+GQ	0	11:40:54.846	S
+11:40:55|H	0	11:40:55.466	SMC_Universal (PainX 600,M1)	???? DEBUG - Position analys??e - PainX 800 | Profit: -2.52$ | Ticket: 591272554 | Cat??gorie: BOOM_CRASH | ??ge: 820s
+RO	0	11:40:55.466	S
+11:40:57|G	0	11:40:57.416	SMC_Universal (PainX 400,M1)	???? DEBUG - Position analys??e - PainX 800 | Profit: -2.53$ | Ticket: 591272554 | Cat??gorie: BOOM_CRASH | ??ge: 822s
+OE	0	11:40:57.417	S
+11:40:58|	0	11:40:58.128	SMC_Universal (TrendX 600,M1)	???? DEBUG - Position analys??e - PainX 800 | Profit: -2.53$ | Ticket: 591272554 | Cat??gorie: BOOM_CRASH | ??ge: 823s
+KQ	0	11:40:58.128	S
+11:40:58|
+KQ	0	11:40:58.128	SMC_Universal (FlipX 2,M1)	???? DEBUG - Position analys??e - PainX 800 | Profit: -2.53$ | Ticket: 591272554 | Cat??gorie: BOOM_CRASH | ??ge: 823s
+RJ	0	11:40:58.128	S
+11:40:59|
+HK	0	11:40:59.127	SMC_Universal (FlipX 1,M1)	???? DEBUG - Position analys??e - PainX 800 | Profit: -2.54$ | Ticket: 591272554 | Cat??gorie: BOOM_CRASH | ??ge: 824s
+DM	0	11:40:59.224	S
+11:41:02|E	0	11:41:02.769	SMC_Universal (GainX 999,M1)	???? DEBUG - Position analys??e - PainX 800 | Profit: -2.55$ | Ticket: 591272554 | Cat??gorie: BOOM_CRASH | ??ge: 828s
+EK	0	11:41:02.769	S
+11:41:04|J	0	11:41:04.049	SMC_Universal (GainX 800,M1)	???? DEBUG - Position analys??e - PainX 800 | Profit: -2.55$ | Ticket: 591272554 | Cat??gorie: BOOM_CRASH | ??ge: 829s
+RP	0	11:41:04.070	S
+11:41:04|	0	11:41:04.070	SMC_Universal (SFX Vol 20,M1)	???? DEBUG - Position analys??e - PainX 800 | Profit: -2.55$ | Ticket: 591272554 | Cat??gorie: BOOM_CRASH | ??ge: 829s
+EE	0	11:41:04.083	S
+11:41:04|
+CJ	0	11:41:04.313	SMC_Universal (FlipX 2,M1)	???? DEBUG - Position analys??e - PainX 800 | Profit: -2.55$ | Ticket: 591272554 | Cat??gorie: BOOM_CRASH | ??ge: 829s
+IN	0	11:41:04.316	S
+11:41:04|
+CR	0	11:41:04.325	SMC_Universal (FlipX 1,M1)	???? DEBUG - Position analys??e - PainX 800 | Profit: -2.55$ | Ticket: 591272554 | Cat??gorie: BOOM_CRASH | ??ge: 829s
+CO	0	11:41:04.326	S
+11:41:04|E	0	11:41:04.640	SMC_Universal (PainX 600,M1)	???? DEBUG - Position analys??e - PainX 800 | Profit: -2.55$ | Ticket: 591272554 | Cat??gorie: BOOM_CRASH | ??ge: 830s
+NM	0	11:41:04.641	S
+11:41:05|] === Rafra?chissement serveur: PainX 800 ===
+HO	0	11:41:05.173	SMC_Universal (PainX 800,M1)	[DOW] Server trendline: SELL p0=116467.76837 p1=116502.85177 slope=0.011244679460875116 proj=116438.1356 broken=false
+ON	0	11:41:05.174	S
+11:41:05|ed=true vn=0 M1=BULL M5=BULL M15=BULL H1=NEUT
+OF	0	11:41:05.174	SMC_Universal (PainX 800,M1)	[BLOCK-DEBUG] DOW Mode | UseDowTrendline=true g_dowState.active=false dowExclusiveMode=false
+ER	0	11:41:05.174	S
+11:41:05|e | PainX 800 | verdict GOM WAIT ou absent | 
+JP	0	11:41:05.174	SMC_Universal (PainX 800,M1)	[SMCGR] Erreur fermeture ticket #591272554 err=69550
+OK	0	11:41:05.282	S
+11:41:05| Erreur fermeture ticket #591272554 err=69550
+OK	0	11:41:05.282	SMC_Universal (PainX 800,M1)	[BLOCK-DEBUG] Correction/Retrace | inRetrace=true corrPhase=none corrExhaust=78.8% corrEntrySafe=true m1EntryBlocked=false
+CH	0	11:41:05.284	S
+11:41:05|O	0	11:41:05.571	SMC_Universal (GainX 999,M1)	???? DEBUG - Position analys??e - PainX 800 | Profit: -2.56$ | Ticket: 591272554 | Cat??gorie: BOOM_CRASH | ??ge: 831s
+EH	0	11:41:05.572	S
+11:41:05|J	0	11:41:05.867	SMC_Universal (PainX 400,M1)	???? DEBUG - Position analys??e - PainX 800 | Profit: -2.56$ | Ticket: 591272554 | Cat??gorie: BOOM_CRASH | ??ge: 831s
+KF	0	11:41:05.868	S
+11:41:06|| M1=BEAR M5=NEUT M15=BEAR H1=BEAR | dir=SELL
+IH	0	11:41:06.042	SMC_Universal (PainX 800,M1)	? Pattern Override - Weak GOM overridden by strong BUY patterns
+QJ	0	11:41:06.042	S
+11:41:06|
+QK	0	11:41:06.924	SMC_Universal (FlipX 1,M1)	???? DEBUG - Position analys??e - PainX 800 | Profit: -2.56$ | Ticket: 591272554 | Cat??gorie: BOOM_CRASH | ??ge: 832s
+NJ	0	11:41:06.944	S
+11:41:07|J	0	11:41:07.028	SMC_Universal (GainX 400,M1)	???? DEBUG - Position analys??e - PainX 800 | Profit: -2.56$ | Ticket: 591272554 | Cat??gorie: BOOM_CRASH | ??ge: 832s
+OQ	0	11:41:07.029	S
+11:41:07|d=OK | verdict=WAIT ??? attendre GOOD/PERFECT
+PF	0	11:41:07.150	SMC_Universal (PainX 800,M1)	[UNIFIED] skip SIMPLE | vn=0 min=1 synthAuto=true
+RN	0	11:41:07.173	S
+11:41:07|	0	11:41:07.173	SMC_Universal (PainX 1200,M1)	???? DEBUG - Position analys??e - PainX 800 | Profit: -2.56$ | Ticket: 591272554 | Cat??gorie: BOOM_CRASH | ??ge: 832s
+DF	0	11:41:07.202	S
+11:41:07|| MaxLossDollars: 3.0 | BoomCrashSpikeTP: 0.8
+KF	0	11:41:07.669	SMC_Universal (PainX 800,M1)	???? DEBUG - Position analys??e - PainX 800 | Profit: -2.56$ | Ticket: 591272554 | Cat??gorie: BOOM_CRASH | ??ge: 833s
+FQ	0	11:41:07.669	S
+11:41:07|1272554 | Cat??gorie: BOOM_CRASH | ??ge: 833s
+FQ	0	11:41:07.669	SMC_Universal (PainX 800,M1)	[7MIN-CLOSE] Perte >= $2.50 apr??s 13 min sur PainX 800 | profit=-2.56 | ticket=591272554 ??? fermeture
+DE	0	11:41:07.669	S
+11:41:07|N] PERTE SEUIL ATTEINT - Fermeture autoris??e
+PG	0	11:41:07.669	SMC_Universal (PainX 800,M1)	   [INFO] Position: PainX 800 | Ticket: 591272554
+EO	0	11:41:07.669	S
+11:41:07|PainX 800,M1)	   [OK] Raison: 7min loss close
+DS	0	11:41:07.669	SMC_Universal (PainX 800,M1)	[ALERT] FERMETURE D??TECT??E - PainX 800 | Ticket: 591272554 | Profit: -2.56$ | ??ge: 833s | Raison: 7min loss close
+HK	0	11:41:07.723	S
+11:41:07|fit r??initialis?? pour la prochaine position
+PR	0	11:41:07.886	SMC_Universal (PainX 800,M1)	[SPIKE-BLINK] WAIT PainX 800 | GOM WAIT: exception HTF d?sactiv?e ou direction non native | GOM=0/0 connected=true entryAllowed=false M1=BULL M5=B
+11:41:10|| MaxLossDollars: 3.0 | BoomCrashSpikeTP: 0.8
+HN	0	11:41:10.353	SMC_Universal (PainX 800,M1)	[SMCCT] Dow Overlay: WAIT EP=116510.38 zone=[116509.76 - 116510.99]
+EQ	0	11:41:10.355	S
+11:41:10|AIT EP=116510.38 zone=[116509.76 - 116510.99]
+EQ	0	11:41:10.355	SMC_Universal (PainX 800,M1)	[SMC-DEBUG] TV Sync vars: SetupValid=true Entry=116433.54 SL=116416.76544143999 KolaBuy=116433.54 KolaSell=116507.76
+HF	0	11:41:11.135	S
