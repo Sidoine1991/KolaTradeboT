@@ -378,19 +378,6 @@ void LJ_OnTick()
    LJ_ShadowProcess(now);
 }
 
-//--- wrapper de la gate finale : journalise les refus -----------------
-bool SMC_FinalOpenGate(const string symbol, const ENUM_ORDER_TYPE orderType)
-{
-   bool ok = SMC_FinalOpenGate_Impl(symbol, orderType);
-   if(!ok)
-   {
-      bool isBuy = (orderType == ORDER_TYPE_BUY || orderType == ORDER_TYPE_BUY_LIMIT ||
-                    orderType == ORDER_TYPE_BUY_STOP || orderType == ORDER_TYPE_BUY_STOP_LIMIT);
-      LJ_ShadowCandidate(symbol, isBuy, "FINAL_GATE");
-   }
-   return ok;
-}
-
 //--- reconstitution de l'historique du compte ---------------------------
 void LJ_Profile(const MqlRates &r[], const int n, double &poc, double &vah, double &val)
 {

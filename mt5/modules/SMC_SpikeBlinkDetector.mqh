@@ -13,7 +13,7 @@
 #define SPIKE_BLINK_INPUTS_DEFINED
 input group "=== SPIKE BLINK DETECTOR (GOOD/PERFECT) ==="
 input bool   UseSpikeBlinkDetector     = true;
-input int    SpikeBlinkMinAlignedTF    = 2;      // FIX 2026-10-20: 2 TF suffisent (M1+M5) — M15 lagge souvent
+input int    SpikeBlinkMinAlignedTF    = 3;      // FIX v1.34: exiger M1+M5+M15 (était 2)
 input double SpikeBlinkApproachATR     = 0.35;
 input int    SpikeBlinkIntervalMs      = 450;
 input bool   SpikeBlinkAutoFire        = true;
@@ -21,10 +21,9 @@ input double SpikeBlinkSL_ATR          = 1.2;
 input double SpikeBlinkTP_ATR          = 2.4;
 input double SpikeBlinkMaxSLUSD        = 2.0;    // FIX v1.34: SL hard-cap $2 pour capturer le spike
 input double SpikeBlinkMinTPUSD        = 0.80;   // FIX v1.34: TP mini $ pour sortir en gain
-input bool   SpikeBlinkRequireTripleTF = false;  // FIX 2026-10-20: false — M1+M5 suffisent pour armer
+input bool   SpikeBlinkRequireTripleTF = true;   // Compatibilité set-file; M1/M5/M15 toujours obligatoires
 input int    SpikeBlinkSetupMaxAgeMinutes = 15;  // Expiration du setup armé; ne garantit pas la durée d'une chaîne
-input int    SpikeBlinkMinTransitions = 2;   // FIX 2026-10-20: 2 transitions (au lieu de 4) avant tir
-input bool   UseSpikeBlinkHTFWaitOverride = false; // v1.56: WAIT = aucun ordre (plus de bypass HTF)
+input bool   UseSpikeBlinkHTFWaitOverride = false; // v1.57 OFF: WAIT ne doit plus ouvrir via HTF
 #endif
 
 #ifndef G_SMC_GOM_EXTERN
@@ -40,6 +39,9 @@ extern string   g_smcTfD1Dir;
 #endif
 extern int      g_spikeChainDirection;
 extern int      g_spikeChainStrongBars;
+
+// Forward declaration for function defined in SMC_Universal.mq5
+bool SMC_BCNativeBypass(const string symbol, const int dirSign);
 
 enum ENUM_SPIKE_BLINK_STATE
 {
@@ -112,17 +114,11 @@ int SMC_SpikeBlink_EffectiveVn()
 
 bool SMC_SpikeBlink_TripleTFAligned(const int dirSign)
 {
-   // FIX 2026-10-20: respecte SpikeBlinkMinAlignedTF (2 = M1+M5 suffisent)
-   // et SpikeBlinkRequireTripleTF (false = ne force plus les 3 TF)
    if(dirSign == 0) return false;
    string m1 = (StringLen(g_smcTfM1DirLive) > 0) ? g_smcTfM1DirLive : g_smcTfM1Dir;
-   int aligned = 0;
-   if(SMC_SpikeBlink_TfDirSign(m1) == dirSign) aligned++;
-   if(SMC_SpikeBlink_TfDirSign(g_smcTfM5Dir) == dirSign) aligned++;
-   if(SMC_SpikeBlink_TfDirSign(g_smcTfM15Dir) == dirSign) aligned++;
-   int need = SpikeBlinkRequireTripleTF ? 3 : MathMax(2, SpikeBlinkMinAlignedTF);
-   if(need > 3) need = 3;
-   return (aligned >= need);
+   return (SMC_SpikeBlink_TfDirSign(m1) == dirSign &&
+           SMC_SpikeBlink_TfDirSign(g_smcTfM5Dir) == dirSign &&
+           SMC_SpikeBlink_TfDirSign(g_smcTfM15Dir) == dirSign);
 }
 
 int SMC_SpikeBlink_NativeDir(const string symbol)
@@ -457,7 +453,7 @@ bool SMC_SpikeBlink_EntryReady(const string symbol, const int dirSign, string &r
       reason = "direction ou âge du setup Spike Blink invalide";
       return false;
    }
-   if(g_spikeBlink.blinkTransitions < MathMax(1, SpikeBlinkMinTransitions) || !g_spikeBlink.blinkVisible ||
+   if(g_spikeBlink.blinkTransitions < 4 || !g_spikeBlink.blinkVisible ||
       StringLen(g_spikeBlink.arrowName) == 0 ||
       ObjectFind(0, g_spikeBlink.arrowName) < 0)
    {
@@ -479,7 +475,7 @@ bool SMC_SpikeBlink_EntryReady(const string symbol, const int dirSign, string &r
    int vn = SMC_SpikeBlink_EffectiveVn();
    if(!g_smcGomConnected || MathAbs(vn) < 2 ||
       ((vn > 0) ? 1 : -1) != dirSign ||
-      (!SMC_SpikeBlink_TripleTFAligned(dirSign) && !SMC_BCNativeBypass(symbol, dirSign)))
+      !SMC_SpikeBlink_TripleTFAligned(dirSign))
    {
       reason = "GOM GOOD/PERFECT ou alignement M1/M5/M15 perdu";
       return false;
@@ -510,13 +506,21 @@ bool SMC_SpikeBlink_OrderAllowed(const string symbol, const int dirSign,
    if(!UseSpikeBlinkDetector || symbol != _Symbol ||
       SMC_SpikeBlink_NativeDir(symbol) == 0)
       return true;
+   int vnBlink = SMC_SpikeBlink_EffectiveVn();
+   if(MathAbs(vnBlink) < 2 && MathAbs(g_smcGomVerdictNum) >= 2)
+      vnBlink = g_smcGomVerdictNum;
+   if(MathAbs(vnBlink) < 2 && MathAbs(g_smcGomVerdictNumServer) >= 2)
+      vnBlink = g_smcGomVerdictNumServer;
+   bool vnAligned = (MathAbs(vnBlink) >= 2 && ((vnBlink > 0) ? 1 : -1) == dirSign);
+   // Scalp KOLA/OB : LIMIT autorisé si GOM GOOD/PERFECT aligné (SMVE)
    if(!isMarketOrder)
    {
-      reason = "ordre différé interdit; attendre la flèche puis entrer au marché";
+      if(vnAligned)
+         return true;
+      reason = "ordre différé interdit; attendre flèche OU GOM GOOD/PERFECT";
       return false;
    }
-   int vnBlink = SMC_SpikeBlink_EffectiveVn();
-   if(MathAbs(vnBlink) >= 2 && ((vnBlink > 0) ? 1 : -1) == dirSign)
+   if(vnAligned)
       return true;
    return SMC_SpikeBlink_EntryReady(symbol, dirSign, reason);
 }
@@ -641,8 +645,7 @@ bool SMC_SpikeBlink_TryFire()
       return false;
    }
 
-   if(!htfOverride && !SMC_SpikeBlink_TripleTFAligned(g_spikeBlink.dirSign) &&
-      !SMC_BCNativeBypass(_Symbol, g_spikeBlink.dirSign))
+   if(!htfOverride && !SMC_SpikeBlink_TripleTFAligned(g_spikeBlink.dirSign))
    {
       SMC_SpikeBlink_LogBlocked("M1/M5/M15 non alignés avec le sens du spike");
       return false;
@@ -854,28 +857,21 @@ void SMC_SpikeBlink_OnTick()
    bool htfWaitOk = (!gomOk &&
                      SMC_SpikeBlink_HTFWaitSetup(_Symbol, native, liveSpike, overrideReason));
 
-   // GOOD/PERFECT natif (gomOk) suffit : M15 lagge souvent (ex. GainX BUY M1/M5 BULL M15 BEAR).
-   if(!gomOk && !htfWaitOk)
+   if((!gomOk && !htfWaitOk) || (!htfWaitOk && !tripleOk))
    {
       if(g_spikeBlink.state != SPIKE_BLINK_IDLE && g_spikeBlink.state != SPIKE_BLINK_FIRED)
          SMC_SpikeBlink_Reset();
       g_smcSpikeBlinkHTFDisplayDir = 0;
-      SMC_SpikeBlink_LogBlocked("GOM WAIT: " + overrideReason);
-      return;
-   }
-   if(!gomOk && !tripleOk)
-   {
-      if(g_spikeBlink.state != SPIKE_BLINK_IDLE && g_spikeBlink.state != SPIKE_BLINK_FIRED)
-         SMC_SpikeBlink_Reset();
-      g_smcSpikeBlinkHTFDisplayDir = 0;
-      SMC_SpikeBlink_LogBlocked("en attente de l'alignement M1/M5/M15");
+      SMC_SpikeBlink_LogBlocked(!gomOk && !htfWaitOk
+         ? "GOM WAIT: " + overrideReason
+         : "en attente de l'alignement M1/M5/M15");
       return;
    }
 
    double channelLevel = 0.0;
    string patternName = "";
    string contextReason = "";
-   if(!gomOk && !htfWaitOk &&
+   if(!htfWaitOk &&
       !SMC_SpikeBlink_ChannelPatternContext(native, channelLevel, patternName, contextReason))
    {
       if(g_spikeBlink.state != SPIKE_BLINK_IDLE && g_spikeBlink.state != SPIKE_BLINK_FIRED)
@@ -967,8 +963,8 @@ double htfEntryPrice = (native > 0)
    SMC_SpikeBlink_Toggle();
 
    // Attendre que la flèche soit apparue et ait complété deux phases visibles.
-   if((htfWaitOk || (gomOk && (tripleOk || SMC_BCNativeBypass(_Symbol, native)))) &&
-      g_spikeBlink.blinkTransitions >= MathMax(1, SpikeBlinkMinTransitions) && g_spikeBlink.blinkVisible)
+   if((htfWaitOk || (gomOk && tripleOk)) &&
+      g_spikeBlink.blinkTransitions >= 4 && g_spikeBlink.blinkVisible)
       SMC_SpikeBlink_TryFire();
    else
       SMC_SpikeBlink_LogBlocked("setup qualifié; attente du clignotement confirmé");

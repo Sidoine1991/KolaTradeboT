@@ -188,11 +188,17 @@ int SMC_PGI_AdjustGOMVerdict(const int originalGOMNum, const string symbol, cons
             trendDir = SMC_PGI_GetTrendDirection(symbol, tf);
          }
 
+         // Famille native: jamais forcer SELL sur GainX/Boom ni BUY sur PainX/Crash
+         string su = symbol; StringToUpper(su);
+         bool buyOnly  = (StringFind(su, "BOOM") >= 0 || StringFind(su, "GAINX") >= 0);
+         bool sellOnly = (StringFind(su, "CRASH") >= 0 || StringFind(su, "PAINX") >= 0);
+
          // Override BUY: seulement si pas en downtrend fort
          if(g_patternGomState.patternDirection > 0 && originalGOMNum < 2) {
-            if(InpPatternRespectTrend && trendDir < 0) {
+            if(sellOnly) {
+               Print("🚫 Pattern Override BLOCKÉ - BUY interdit sur PainX/Crash | ", symbol);
+            } else if(InpPatternRespectTrend && trendDir < 0) {
                Print("🚫 Pattern Override BLOCKÉ - BUY patterns en downtrend (EMA 50) | ", symbol);
-               // Pas d'override, garder le GOM original (probablement SELL ou WAIT)
             } else {
                adjustedGOM = 2; // Forcer BUY GOOD
                Print("🔄 Pattern Override - Weak GOM overridden by strong BUY patterns");
@@ -200,9 +206,10 @@ int SMC_PGI_AdjustGOMVerdict(const int originalGOMNum, const string symbol, cons
          }
          // Override SELL: seulement si pas en uptrend fort
          else if(g_patternGomState.patternDirection < 0 && originalGOMNum > -2) {
-            if(InpPatternRespectTrend && trendDir > 0) {
+            if(buyOnly) {
+               Print("🚫 Pattern Override BLOCKÉ - SELL interdit sur GainX/Boom | ", symbol);
+            } else if(InpPatternRespectTrend && trendDir > 0) {
                Print("🚫 Pattern Override BLOCKÉ - SELL patterns en uptrend (EMA 50) | ", symbol);
-               // Pas d'override, garder le GOM original
             } else {
                adjustedGOM = -2; // Forcer SELL GOOD
                Print("🔄 Pattern Override - Weak GOM overridden by strong SELL patterns");
