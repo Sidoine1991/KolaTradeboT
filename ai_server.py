@@ -4716,7 +4716,8 @@ async def auth_middleware(request: Request, call_next):
         expected_api_key = os.getenv("AI_SERVER_API_KEY")
 
         if not expected_api_key:
-            logger.warning("AI_SERVER_API_KEY not set in environment - allowing requests without auth (development mode)")
+            # debug only — warning×centaines/min saturait les I/O et l'event loop
+            logger.debug("AI_SERVER_API_KEY not set - allowing unauthenticated requests")
         elif not api_key or api_key != expected_api_key:
             logger.warning(f"Invalid or missing API key for {request.url.path} from {request.client.host}")
             return JSONResponse(
@@ -4759,6 +4760,17 @@ except ImportError as _core_import_err:
     logger.warning(f"⚠️ Core Engine non disponible (installer MetaTrader5): {_core_import_err}")
 except Exception as _core_reg_err:
     logger.warning(f"⚠️ Core Engine registration failed: {_core_reg_err}")
+
+# === GOM Auto Trading Routes ===
+# Enregistrement des endpoints GOM auto trading (/api/gom/auto-trade, /api/gom/data/{symbol}, ...)
+try:
+    from api.routes.gom_auto import add_gom_auto_routes
+    add_gom_auto_routes(app)
+    logger.info("✅ GOM Auto Trading routes enregistrées — /api/gom/* disponibles")
+except ImportError as _gom_import_err:
+    logger.warning(f"⚠️ Routes GOM auto trading non disponibles: {_gom_import_err}")
+except Exception as _gom_reg_err:
+    logger.warning(f"⚠️ GOM Auto Trading registration failed: {_gom_reg_err}")
 
 # Enregistrement du router des agents d'intelligence (avant startup)
 # Si agents désactivés dans ai_server → proxy vers agents/server.py (port 8001)
@@ -5897,13 +5909,18 @@ async def startup_event():
         )
 
     # Cache compte MT5 pour dashboard (léger — lecture MetaTrader5 si terminal ouvert)
+    # Désactivable : le bridge MT5 partage le terminal avec gom_mt5_poller et peut
+    # geler l'event loop (CLOSE_WAIT /health mort → WAIT partout côté EA).
     global _mt5_bridge_loop_task
-    try:
-        import asyncio as _asyncio
-        _mt5_bridge_loop_task = _asyncio.create_task(_mt5_bridge_background_loop())
-        logger.info("Pont MT5 dashboard actif (refresh %ds)", _MT5_BRIDGE_LOOP_SEC)
-    except Exception as _br_err:
-        logger.warning("Pont MT5 dashboard non démarré: %s", _br_err)
+    if AI_DISABLE_BACKGROUND_TASKS or not _env_bool("AI_ENABLE_MT5_BRIDGE", True):
+        logger.info("ℹ️ Pont MT5 dashboard désactivé (AI_DISABLE_BACKGROUND_TASKS / AI_ENABLE_MT5_BRIDGE=false)")
+    else:
+        try:
+            import asyncio as _asyncio
+            _mt5_bridge_loop_task = _asyncio.create_task(_mt5_bridge_background_loop())
+            logger.info("Pont MT5 dashboard actif (refresh %ds)", _MT5_BRIDGE_LOOP_SEC)
+        except Exception as _br_err:
+            logger.warning("Pont MT5 dashboard non démarré: %s", _br_err)
 
     # Scan opportunités WhatsApp (tous terminaux: Deriv + Weltrade + Forex...)
     global _wa_opp_scan_task
@@ -10532,8 +10549,48 @@ _gom_executor = concurrent.futures.ThreadPoolExecutor(
     max_workers=int(os.getenv("GOM_DASHBOARD_WORKERS", "12")),
     thread_name_prefix="gom_dash",
 )
+_cog_short_executor = concurrent.futures.ThreadPoolExecutor(
+    max_workers=int(os.getenv("COG_SHORT_WORKERS", "4")),
+    thread_name_prefix="cog_short",
+)
+_cog_path_executor = concurrent.futures.ThreadPoolExecutor(
+    max_workers=int(os.getenv("COG_PATH_WORKERS", "4")),
+    thread_name_prefix="cog_path",
+)
+_mt5_upload_executor = concurrent.futures.ThreadPoolExecutor(
+    max_workers=int(os.getenv("MT5_UPLOAD_WORKERS", "4")),
+    thread_name_prefix="mt5_upload",
+)
 _gom_bridge_singleton = None
 _SUPABASE_HTTP_CLIENT: Optional[Any] = None
+
+
+def _gom_cached_or_schedule_cognition(sym: str, record: dict) -> None:
+    """Queue les refreshes cognition sans bloquer le fast path GOM."""
+    try:
+        if not sym or not record:
+            return
+
+        def refresh_short():
+            try:
+                from python.ml.cognition_forecast import forecast_short_horizon
+                cache = _mt5_candles_cache.get(sym, {})
+                return forecast_short_horizon(cache.get("M1", pd.DataFrame()), sym, gom=record)
+            except Exception:
+                return None
+
+        def refresh():
+            try:
+                from python.ml.cognition_forecast import forecast_200
+                cache = _mt5_candles_cache.get(sym, {})
+                return forecast_200(cache.get("M15", pd.DataFrame()), sym, timeframe="M15", horizon=200, gom=record)
+            except Exception:
+                return None
+
+        _cog_short_executor.submit(refresh_short)
+        _cog_path_executor.submit(refresh)
+    except Exception:
+        pass
 
 
 def _gom_finalize_verdict_pipeline(out: dict, sym: str, chart_tf: str = "M15") -> None:
@@ -10834,24 +10891,22 @@ def _gom_apply_price_reality_final(out: dict, symbol: str) -> None:
         if new_vn == vn and not reason:
             return
         out["price_reality_reason"] = reason
-        # FIX 2026-09-06: ne pas écraser le vrai verdict calculé.
-        # Dégrade uniquement effective_* ; conserve verdict_num analytique si non-nul.
-        orig_vn = int(out.get("verdict_server_num", out.get("verdict_reactive_num", vn)) or 0)
+        # Gate AND prix : rétrograde UNIQUEMENT l'exécution (effective_*).
+        # verdict_num / verdict_server_* restent le vrai verdict calculé.
+        orig_vn = int(out.get("verdict_server_num", out.get("verdict_reactive_num", 0)) or 0)
         if orig_vn == 0:
-            orig_vn = vn
+            orig_vn = int(out.get("verdict_num", vn) or 0)
         out["effective_verdict_num"] = new_vn
         out["effective_verdict"] = verdict_text_from_num(new_vn)
-        if new_vn == 0 and orig_vn != 0:
+        if orig_vn != 0:
             out["verdict_num"] = orig_vn
             out["verdict"] = verdict_text_from_num(orig_vn)
             out["verdict_server_num"] = orig_vn
             out["verdict_server"] = verdict_text_from_num(orig_vn)
+        if new_vn == 0 and orig_vn != 0:
             out["correction_wait"] = True
             out.setdefault("correction_wait_reason", reason or "price reality gate")
             out["entry_allowed"] = False
-        else:
-            out["verdict_num"] = new_vn
-            out["verdict"] = verdict_text_from_num(new_vn)
         out["harmonized_m1"] = True
         out["verdict_mode"] = "reactive_pine"
     except Exception as exc:
@@ -10917,8 +10972,14 @@ def _gom_apply_predictive_verdict_blend(out: dict, symbol: str) -> None:
 
       out["effective_verdict_num"] = eff_vn
       out["effective_verdict"] = eff_txt
-      out["verdict_num"] = eff_vn
-      out["verdict"] = eff_txt
+      if reactive_vn != 0:
+          out["verdict_num"] = reactive_vn
+          out["verdict"] = reactive_txt
+          out.setdefault("verdict_server_num", reactive_vn)
+          out.setdefault("verdict_server", reactive_txt)
+      else:
+          out["verdict_num"] = eff_vn
+          out["verdict"] = eff_txt
       out["verdict_mode"] = "predictive_blend"
       out["forecast_horizon_bars"] = 5
   except Exception as exc:
@@ -11154,8 +11215,6 @@ def _gom_apply_correction_verdict_wait(out: dict, symbol: str) -> None:
             new_txt = "BUY" if new_vn > 0 else "SELL"
         out["correction_wait"] = False
         out["correction_step_down"] = True
-        out["verdict_num"] = new_vn
-        out["verdict"] = new_txt
         out["effective_verdict_num"] = new_vn
         out["effective_verdict"] = new_txt
         if abs(new_vn) < 2:
@@ -11165,7 +11224,7 @@ def _gom_apply_correction_verdict_wait(out: dict, symbol: str) -> None:
             out["entry_allowed"] = True
             out.pop("entry_block_reason", None)
         logger.info(
-            f"[GOM-CORR-STEP] {symbol}: vn={vn}→{new_vn} ({reason}) structure_alive"
+            f"[GOM-CORR-STEP] {symbol}: display vn={vn} keep, effective={new_vn} ({reason})"
         )
         return
 
@@ -11179,13 +11238,11 @@ def _gom_apply_correction_verdict_wait(out: dict, symbol: str) -> None:
             new_txt = "BUY" if new_vn > 0 else "SELL"
         out["correction_wait"] = False
         out["correction_step_down"] = True
-        out["verdict_num"] = new_vn
-        out["verdict"] = new_txt
         out["effective_verdict_num"] = new_vn
         out["effective_verdict"] = new_txt
         out["entry_allowed"] = True
         logger.info(
-            f"[GOM-CORR-FLOOR-GOOD] {symbol}: vn={vn}→{new_vn} (évite WAIT) reason={reason}"
+            f"[GOM-CORR-FLOOR-GOOD] {symbol}: display vn={vn} keep, effective={new_vn} reason={reason}"
         )
         return
 
@@ -11780,7 +11837,7 @@ async def gom_kola_dashboard(
 
                     inflight.add_done_callback(_clear_inflight)
 
-        wait_sec = float(os.getenv("GOM_DASHBOARD_WAIT_SEC", "4"))
+        wait_sec = float(os.getenv("GOM_DASHBOARD_WAIT_SEC", "15"))
         # FIX 2026-08-28: store poller = vérité absolue. Ne jamais écraser un
         # GOOD/PERFECT récent par un WAIT (timeout ou recalcul live sans candles).
         store_ttl_prefer = float(os.getenv("GOM_POLLER_STORE_CACHE_SEC", "300"))
@@ -11829,16 +11886,20 @@ async def gom_kola_dashboard(
                     f"store très ancien (age={any_age_fallback.get('cache_age_sec')}s) servi pour affichage"
                 )
                 return _gom_family_guard_response(sym, any_age_fallback)
+            # ok:false (pas ok:true+WAIT) : l'EA garde le dernier verdict frais
+            # au lieu d'afficher WAIT partout quand le calcul live est lent.
             logger.warning(
-                f"[GOM-DASH] {sym} timeout {wait_sec}s + no store → WAIT (computation continues in background)"
+                f"[GOM-DASH] {sym} timeout {wait_sec}s + no store → ok=false "
+                f"(computation continues in background; EA keep-last)"
             )
             wait_skel = {
-                "ok": True,
+                "ok": False,
                 "symbol": sym,
                 "verdict": "WAIT",
                 "verdict_num": 0,
                 "action": "WAIT",
                 "gate": "compute_timeout",
+                "message": "GOM compute timeout — keep last EA verdict",
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "source": "local_timeout",
             }
@@ -11992,36 +12053,64 @@ async def gom_live_status(
 
 
 @app.post("/mt5/upload-candles")
-async def mt5_upload_candles(request: MT5CandlesRequest):
+@app.post("/mt5//upload-candles")  # alias: certains EA envoient un double slash
+async def mt5_upload_candles(http_request: Request):
     """
-    Endpoint pour que MT5 envoie les candles FRAÎCHES à l'API.
-
-    Le traitement lourd (DataFrame, purge cache, spike scan) est déplacé
-    dans l'executor pour ne pas bloquer l'event loop asyncio.
-
-    FIX 2026-09-06 : handler sync pur était le goulot d'étranglement — les
-    EAs uploadaient des centaines de candles toutes les 2-5s × 15 charts,
-    affamant l'event loop et tuant /health + poller + GET dashboard.
+    Upload bougies MT5 — lecture JSON brute (jamais .symbol sur Request).
+    FIX 2026-10-30: AttributeError Request.symbol + route double-slash.
     """
     try:
-        raw_symbol = request.symbol or ""
+        try:
+            payload = await http_request.json()
+        except Exception:
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        raw_symbol = str(payload.get("symbol") or "")
+        timeframe = str(payload.get("timeframe") or "M1")
+        candles_list = payload.get("candles") or []
         symbol = _resolve_symbol(raw_symbol) or raw_symbol
-        timeframe = request.timeframe
+        candles_raw = []
+        for c in candles_list:
+            if isinstance(c, dict):
+                candles_raw.append((
+                    int(c.get("time") or 0),
+                    float(c.get("open") or 0),
+                    float(c.get("high") or 0),
+                    float(c.get("low") or 0),
+                    float(c.get("close") or 0),
+                    float(c.get("volume") or 0),
+                ))
+            elif isinstance(c, (list, tuple)) and len(c) >= 5:
+                candles_raw.append((
+                    int(c[0]), float(c[1]), float(c[2]), float(c[3]), float(c[4]),
+                    float(c[5]) if len(c) > 5 else 0.0,
+                ))
 
-        candles_data = [
-            {
-                'time': pd.to_datetime(c.time, unit='s'),
-                'open': c.open,
-                'high': c.high,
-                'low': c.low,
-                'close': c.close,
-                'volume': c.volume,
-            }
-            for c in request.candles
-        ]
+        if not candles_raw:
+            return JSONResponse(
+                status_code=422,
+                content={
+                    "ok": False,
+                    "error": f"No valid candles provided for {symbol} {timeframe}",
+                    "symbol": symbol,
+                    "timeframe": timeframe,
+                },
+            )
 
         def _process_upload():
             try:
+                candles_data = [
+                    {
+                        'time': pd.to_datetime(t, unit='s'),
+                        'open': o,
+                        'high': h,
+                        'low': l,
+                        'close': cl,
+                        'volume': v,
+                    }
+                    for (t, o, h, l, cl, v) in candles_raw
+                ]
                 df = pd.DataFrame(candles_data)
                 df.set_index('time', inplace=True)
 
@@ -12090,9 +12179,12 @@ async def mt5_upload_candles(request: MT5CandlesRequest):
                                     "timestamp": alert.timestamp,
                                 }
                                 try:
-                                    import asyncio as _asyncio_check
-                                    if _asyncio_check.get_event_loop().is_running():
-                                        _asyncio_check.ensure_future(_spike_chain_push_alert(alert_dict))
+                                    # Appelé depuis l'executor — pas ensure_future (mauvais thread).
+                                    loop_ref = asyncio.get_event_loop()
+                                    if loop_ref.is_running():
+                                        asyncio.run_coroutine_threadsafe(
+                                            _spike_chain_push_alert(alert_dict), loop_ref
+                                        )
                                 except Exception:
                                     pass
                     except Exception as _sc_err:
@@ -12109,22 +12201,21 @@ async def mt5_upload_candles(request: MT5CandlesRequest):
                 }
             except Exception as inner_e:
                 logger.error(f"❌ Error in /mt5/upload-candles: {inner_e}", exc_info=True)
-                return {
-                    "ok": False,
-                    "error": str(inner_e),
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                }
+                raise
 
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(_gom_executor, _process_upload)
+        return await loop.run_in_executor(_mt5_upload_executor, _process_upload)
 
     except Exception as e:
         logger.error(f"❌ Error in /mt5/upload-candles: {e}", exc_info=True)
-        return {
-            "ok": False,
-            "error": str(e),
-            "timestamp": datetime.now(timezone.utc).isoformat()
-        }
+        return JSONResponse(
+            status_code=500,
+            content={
+                "ok": False,
+                "error": str(e),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            },
+        )
 
 
 @app.post("/ml/start")
@@ -12340,43 +12431,57 @@ async def get_pattern_forecast(request: Request):
         lookback = max(500, min(20000, lookback))
         
         logger.info(f"📊 Pattern forecast request: {symbol} horizon={horizon} top_k={top_k} lookback={lookback}")
-        
-        df_m1 = None
-        
-        sym_resolved = _resolve_symbol(symbol) or symbol
-        for cache_key in [symbol, sym_resolved, symbol.upper(), symbol.lower()]:
-            if cache_key and cache_key in _mt5_candles_cache:
-                sym_tfs = _mt5_candles_cache[cache_key]
-                for tf_key in ["M1", "1", "1m", "m1"]:
-                    if tf_key in sym_tfs and len(sym_tfs[tf_key]) >= 200:
-                        df_m1 = sym_tfs[tf_key].tail(lookback).copy()
+
+        # Cache + fetch MT5 + forecast DOIVENT rester hors event loop :
+        # un get_historical_data_mt5 sync bloquait /gom-* → WAIT partout côté EA.
+        def _pattern_forecast_job():
+            df_m1 = None
+            sym_resolved = _resolve_symbol(symbol) or symbol
+            for cache_key in [symbol, sym_resolved, symbol.upper(), symbol.lower()]:
+                if cache_key and cache_key in _mt5_candles_cache:
+                    sym_tfs = _mt5_candles_cache[cache_key]
+                    for tf_key in ["M1", "1", "1m", "m1"]:
+                        if tf_key in sym_tfs and len(sym_tfs[tf_key]) >= 200:
+                            df_m1 = sym_tfs[tf_key].tail(lookback).copy()
+                            break
+                    if df_m1 is not None:
                         break
-                if df_m1 is not None:
-                    break
-        
-        if df_m1 is None:
-            df_m1 = get_historical_data_mt5(symbol, "M1", lookback)
-        
-        if df_m1 is None or len(df_m1) < 200:
-            return {
-                "ok": False,
-                "error": "insufficient_data",
-                "message": f"Got {len(df_m1) if df_m1 is not None else 0} M1 bars, need at least 200",
-            }
-        
-        # forecast_from_patterns charge la library (362MB) — hors boucle asyncio
-        fc = await asyncio.wait_for(
-            asyncio.get_running_loop().run_in_executor(
-                _gom_executor,
-                lambda: forecast_from_patterns(
-                    symbol=symbol,
-                    df_m1=df_m1,
-                    horizon=horizon,
-                    top_k=top_k,
-                ),
-            ),
+            if df_m1 is None:
+                df_m1 = get_historical_data_mt5(symbol, "M1", lookback)
+            if df_m1 is None or len(df_m1) < 200:
+                return {
+                    "ok": False,
+                    "error": "insufficient_data",
+                    "message": f"Got {len(df_m1) if df_m1 is not None else 0} M1 bars, need at least 200",
+                }
+            fc = forecast_from_patterns(
+                symbol=symbol,
+                df_m1=df_m1,
+                horizon=horizon,
+                top_k=top_k,
+            )
+            n_since = 0
+            try:
+                from ml.spike_hazard import detect_spikes
+                if df_m1 is not None and len(df_m1) > 0:
+                    is_spike = detect_spikes(df_m1)
+                    spike_indices = is_spike[is_spike].index.tolist()
+                    if spike_indices:
+                        n_since = len(df_m1) - 1 - spike_indices[-1]
+                    else:
+                        n_since = len(df_m1)
+            except Exception:
+                n_since = 0
+            return {"ok": True, "fc": fc, "n_since": n_since}
+
+        job = await asyncio.wait_for(
+            asyncio.get_running_loop().run_in_executor(_gom_executor, _pattern_forecast_job),
             timeout=45.0,
         )
+        if not job.get("ok"):
+            return job
+        fc = job["fc"]
+        n_since = int(job.get("n_since") or 0)
         
         payload_out = forecast_to_payload(fc)
         payload_out["horizon"] = horizon
@@ -12389,17 +12494,6 @@ async def get_pattern_forecast(request: Request):
             clean_sym = symbol.replace(" Index", "").replace(" ", "").strip()
             model_data = load_hazard_result(clean_sym, _MODELS_DIR)
             if model_data and is_model_validated(clean_sym, _MODELS_DIR):
-                # Use last bar's n_ticks_since_last_spike from df_m1 if available
-                n_since = 0
-                if len(df_m1) > 0:
-                    from ml.spike_hazard import detect_spikes
-                    is_spike = detect_spikes(df_m1)
-                    spike_indices = is_spike[is_spike].index.tolist()
-                    if spike_indices:
-                        last_spike_idx = spike_indices[-1]
-                        n_since = len(df_m1) - 1 - last_spike_idx
-                    else:
-                        n_since = len(df_m1)  # no spike in window -> treat as "far"
                 result = predict_current_hazard(clean_sym, n_since, _MODELS_DIR)
                 if result:
                     h_pct, h_regime = result
@@ -17840,6 +17934,238 @@ async def get_technical_analysis(symbol: str) -> AnalysisResponse:
         # On continue avec les données disponibles
     
     return AnalysisResponse(**response)
+
+# === ENDPOINTS GOM KOLA (pour SMC_Universal.mq5 et poller) ===
+
+# DÉSACTIVÉ 2026-10-28: doublon qui masquait la route réelle (1re déclaration gagne en FastAPI).
+# @app.post("/gom-verdict")
+async def push_gom_verdict_LEGACY_DISABLED(payload: Dict[str, Any]):
+    """
+    Reçoit et stocke le verdict GOM provenant du poller MT5.
+    Utilisé par gom_mt5_poller.py et autres.
+    """
+    try:
+        # Stocker dans l'historique simple (en mémoire)
+        if not hasattr(app.state, "gom_verdicts"):
+            app.state.gom_verdicts = {}
+        symbol = payload.get("symbol")
+        if not symbol:
+            return {"ok": False, "error": "Champ 'symbol' requis"}, 400
+
+        # Ajouter timestamp si manquant
+        if "timestamp" not in payload:
+            payload["timestamp"] = datetime.now().isoformat()
+
+        # Conserver le payload complet comme stocké pour requête GET /gom-kola-dashboard
+        app.state.gom_verdicts[symbol] = payload
+
+        # Stocker aussi dans l'historique pour /gom-verdicts endpoint si nécessaire
+        if not hasattr(app.state, "verdicts_store"):
+            app.state.verdicts_store = {}
+        app.state.verdicts_store[symbol] = payload
+
+        logger.info(
+            "✅ GOM VERDICT stocké: %s -> verdict=%s, VN=%d, coh=%.0f%%, entry=%.2f",
+            symbol,
+            payload.get("verdict", "WAIT"),
+            int(payload.get("verdict_num", 0)),
+            float(payload.get("coherence_pct", 0)),
+            float(payload.get("entry", 0))
+        )
+
+        return {"ok": True, "symbol": symbol, "timestamp": payload.get("timestamp")}
+    except Exception as e:
+        logger.error("❌ Erreur push /gom-verdict: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# DÉSACTIVÉ 2026-10-28: doublon qui masquait la route réelle (1re déclaration gagne en FastAPI).
+# @app.get("/gom-kola-dashboard")
+async def get_gom_kola_dashboard_LEGACY_DISABLED(symbol: str = Query(...), chart_tf: str = Query("15"), source: str = Query("live")):
+    """
+    Version temps réel — utilise GOMSignalsLiveCalculator pour calculer un verdict GOM
+    selon candles MT5 fraîches. Utilisé par SMC_Universal.mq5 (SMC_GOM_Pipeline.mqh).
+    Répond à la structure JSON exacte attendue par SMCGP_ParseGOMBody.
+    """
+    try:
+        # Validation du symbole pour éviter KeyError
+        if not symbol or not isinstance(symbol, str):
+            return {"ok": False, "error": "Paramètre 'symbol' requis"}, 400
+
+        symbol = symbol.strip()
+        if not symbol:
+            return {"ok": False, "error": "Symbole invalide"}, 400
+
+        # Importer ici pour éviter les imports en haut (surcharge des ressources)
+        try:
+            from gom_live_calculator import GOMSignalsLiveCalculator
+        except ImportError:
+            py_dir = Path(__file__).resolve().parent / "python"
+            if str(py_dir) not in sys.path:
+                sys.path.insert(0, str(py_dir))
+            from gom_live_calculator import GOMSignalsLiveCalculator
+
+        calc = GOMSignalsLiveCalculator()
+        live_result = calc.build_api_response(symbol, chart_tf=chart_tf)
+
+        if not live_result.get("ok"):
+            logger.warning("GOM KOLA tableau de bord: erreur live pour %s: %s",
+                         symbol, live_result.get("error", "no candles"))
+            # Retourner WAIT comme fallback
+            return {
+                "ok": True,
+                "symbol": symbol,
+                "timestamp": datetime.now().isoformat(),
+                "verdict": "WAIT",
+                "verdict_num": 0,
+                "score_buy": 0.0,
+                "score_sell": 0.0,
+                "coherence_pct": 0.0,
+                "entry_quality": 0.0,
+                "kola_buy": 0.0,
+                "kola_sell": 0.0,
+                "bb_up": 0.0,
+                "bb_mid": 0.0,
+                "bb_dn": 0.0,
+                "tf_m1_dir": "NEUT",
+                "tf_m5_dir": "NEUT",
+                "tf_m15_dir": "NEUT",
+                "tf_h1_dir": "NEUT",
+                "tf_h4_dir": "NEUT",
+                "tf_d1_dir": "NEUT",
+                "spike_tradable": False,
+                "bars_since_spike": 0,
+                "price": 0.0,
+                "data_source": "gom_kola_dashboard_fallback"
+            }
+
+        # Retourner le payload compatible SMCGP_ParseGOMBody
+        response = {
+            "ok": True,
+            "symbol": symbol,
+            "timestamp": datetime.now().isoformat(),
+            "verdict": live_result.get("verdict", "WAIT"),
+            "verdict_num": int(live_result.get("verdict_num", 0)),
+            "verdict_num_trade": int(live_result.get("verdict_num_trade", 0)),
+            "trade_block_reason": live_result.get("trade_block_reason", ""),
+            "score_buy": float(live_result.get("score_buy", 0)),
+            "score_sell": float(live_result.get("score_sell", 0)),
+            "verdict_gap": float(live_result.get("verdict_gap", 0)),
+            "kola_buy": float(live_result.get("kola_buy", 0)),
+            "kola_sell": float(live_result.get("kola_sell", 0)),
+            "entry": float(live_result.get("entry", 0)),
+            "close": float(live_result.get("close", 0)),
+            "price": float(live_result.get("price", 0)),
+            "vwap": float(live_result.get("vwap", 0)),
+            "rsi": int(live_result.get("rsi14", 50)),
+            "macd_line": float(live_result.get("macd_line", 0)),
+            "macd_sig": float(live_result.get("macd_sig", 0)),
+            "tf_global_dir": live_result.get("tf_global_dir", "NEUT"),
+            "tf_global_strength": int(live_result.get("tf_global_strength", 0)),
+            "tf_m1_dir": live_result.get("tf_m1_dir", "NEUT"),
+            "tf_m1_rsi": int(live_result.get("tf_m1_rsi", 50)),
+            "tf_m5_dir": live_result.get("tf_m5_dir", "NEUT"),
+            "tf_m5_rsi": int(live_result.get("tf_m5_rsi", 50)),
+            "tf_m15_dir": live_result.get("tf_m15_dir", "NEUT"),
+            "tf_m15_rsi": int(live_result.get("tf_m15_rsi", 50)),
+            "tf_h1_dir": live_result.get("tf_h1_dir", "NEUT"),
+            "tf_h1_rsi": int(live_result.get("tf_h1_rsi", 50)),
+            "tf_h4_dir": live_result.get("tf_h4_dir", "NEUT"),
+            "tf_h4_rsi": int(live_result.get("tf_h4_rsi", 50)),
+            "tf_d1_dir": live_result.get("tf_d1_dir", "NEUT"),
+            "tf_d1_rsi": int(live_result.get("tf_d1_rsi", 50)),
+            "coherence_ok": live_result.get("coherence_ok", False),
+            "coherence_pct": float(live_result.get("coherence_pct", 0)),
+            "filter_ratio": float(live_result.get("filter_ratio", 0)),
+            "bb_up": float(live_result.get("bb_up", 0)),
+            "bb_mid": float(live_result.get("bb_mid", 0)),
+            "bb_dn": float(live_result.get("bb_dn", 0)),
+            "bb_width": float(live_result.get("bb_width", 0)),
+            "st_dir": int(live_result.get("st_dir", 0)),
+            "st_level": float(live_result.get("st_level", 0)),
+            "ob_bull_top": float(live_result.get("ob_bull_top", 0)),
+            "ob_bull_bot": float(live_result.get("ob_bull_bot", 0)),
+            "ob_bear_top": float(live_result.get("ob_bear_top", 0)),
+            "ob_bear_bot": float(live_result.get("ob_bear_bot", 0)),
+            "spike_pct": float(live_result.get("spike_pct", 0)),
+            "spike_level": int(live_result.get("spike_level_num", live_result.get("spike_level", 0))),
+            "imminence_pct": float(live_result.get("spike_imminence", live_result.get("imminence_pct", 0))),
+            "spike_tradable": bool(live_result.get("spike_tradable", False)),
+            "bars_since_spike": int(live_result.get("bars_since_spike", 0)),
+            "m1_opp_bars": int(live_result.get("m1_opp_bars", 0)),
+            "m1_consec_sell_spikes": int(live_result.get("m1_consec_sell_spikes", 0)),
+            "m1_consec_buy_spikes": int(live_result.get("m1_consec_buy_spikes", 0)),
+            "price_direction_1b": float(live_result.get("price_direction_1b", 0)),
+            "price_direction_3b": float(live_result.get("price_direction_3b", 0)),
+            "price_direction_5b": float(live_result.get("price_direction_5b", 0)),
+            "m1_momentum": float(live_result.get("m1_momentum", 0)),
+            "tf_m1_dir_live": live_result.get("tf_m1_dir_live", live_result.get("tf_m1_dir", "NEUT")),
+            "price_reality_reason": live_result.get("price_reality_reason", ""),
+            "verdict_zero_hint": live_result.get("verdict_zero_hint", ""),
+            "harmonized_m1": True,
+            "verdict_mode": "reactive_pine",
+            "m1_last_bar_time": int(live_result.get("m1_last_bar_time", 0)),
+            "spike_progress_pct": float(live_result.get("spike_progress_pct", 0)),
+            "atr": float(live_result.get("atr14", 0)),
+            "atr14": float(live_result.get("atr14", 0)),
+            "entry_quality": float(live_result.get("entry_quality", 0)),
+            "kola_state": "NB" if live_result.get("kola_near_buy") else ("NS" if live_result.get("kola_near_sell") else "---"),
+            "ote_top": float(live_result.get("ote_top", 0)),
+            "ote_bot": float(live_result.get("ote_bot", 0)),
+            "ote_fib618": float(live_result.get("ote_fib618", 0)),
+            "ote_fib786": float(live_result.get("ote_fib786", 0)),
+            "in_ote": bool(live_result.get("in_ote", False)),
+            "ote_dir": int(live_result.get("ote_dir", 0)),
+            "ote_swing_hi": float(live_result.get("ote_swing_hi", 0)),
+            "ote_swing_lo": float(live_result.get("ote_swing_lo", 0)),
+            "pred_path": "",
+            "data_source": live_result.get("data_source", "gom_kola_dashboard_live"),
+            "chart_tf": live_result.get("chart_tf", normalize_tf_key(chart_tf)),
+            "source": live_result.get("data_source", "gom_kola_dashboard_live"),
+            "candle_source": live_result.get("data_source", "gom_kola_dashboard_live"),
+            "asset_category": live_result.get("asset_category", "other"),
+        }
+
+        logger.info(
+            "✅ GOM KOLA dashboard: %s -> verdict=%s, VN=%d, coh=%.0f%%, entry=%.2f, source=%s",
+            symbol,
+            response.get("verdict", "WAIT"),
+            int(response.get("verdict_num", 0)),
+            float(response.get("coherence_pct", 0)),
+            float(response.get("entry", 0)),
+            response.get("data_source", "live")
+        )
+
+        return response
+    except Exception as e:
+        logger.error("❌ Erreur endpoint /gom-kola-dashboard pour %s: %s", symbol, e, exc_info=True)
+        # Renvoyer un payload minimal en cas d'erreur (comme faisait le précédent endpoint)
+        return {
+            "ok": True,
+            "symbol": symbol,
+            "timestamp": datetime.now().isoformat(),
+            "verdict": "WAIT",
+            "verdict_num": 0,
+            "score_buy": 0.0,
+            "score_sell": 0.0,
+            "coherence_pct": 0.0,
+            "entry_quality": 0.0,
+            "kola_buy": 0.0,
+            "kola_sell": 0.0,
+            "bb_up": 0.0,
+            "bb_mid": 0.0,
+            "bb_dn": 0.0,
+            "tf_m1_dir": "NEUT",
+            "tf_m5_dir": "NEUT",
+            "tf_m15_dir": "NEUT",
+            "tf_h1_dir": "NEUT",
+            "tf_h4_dir": "NEUT",
+            "tf_d1_dir": "NEUT",
+            "spike_tradable": False,
+            "bars_since_spike": 0,
+            "price": 0.0,
+            "data_source": "gom_kola_dashboard_error"
+        }
 
 @app.get("/analysis", response_model=AnalysisResponse)
 @app.post("/analysis", response_model=AnalysisResponse)
@@ -28453,7 +28779,7 @@ def _enrich_gom_mtf_from_mt5(record: dict, mt5_symbol: str, fetch: bool = True) 
     _normalize_gom_record_dirs(record)
 
 
-def _build_gom_mt5_payload(record: dict) -> dict:
+def _build_gom_mt5_payload(record: dict, enrich: bool = True) -> dict:
     """Payload plat pour SMC_Universal / TradeManager (dashboard GOM)."""
     out = dict(record)
     sym = record.get("symbol") or out.get("symbol")
@@ -28566,7 +28892,8 @@ def _build_gom_mt5_payload(record: dict) -> dict:
     sym = record.get("symbol") or out.get("symbol")
     if sym:
         _enrich_bc_volatility(out, str(sym))
-        _enrich_cognition_forecast(out, str(sym), str(record.get("chart_tf") or "M1"))
+        if sym and enrich:
+            _enrich_cognition_forecast(out, str(sym), str(record.get("chart_tf") or "M1"))
         out["entry_probability"] = round(_compute_entry_probability(out), 1)
 
     if sym:
@@ -29504,13 +29831,15 @@ async def get_gom_verdict(
                 payload["ok"] = True
                 payload["symbol"] = sym
                 payload["data_source"] = "poller_store"
-                return _gom_family_guard_response(sym, payload, for_execution=True)
+                _gom_cached_or_schedule_cognition(sym, dict(stored))
+                flat = _build_gom_mt5_payload(dict(stored), enrich=False)
+                return _gom_family_guard_response(sym, {"ok": True, "symbol": sym, **flat}, for_execution=True)
         return {
             "ok": False,
             "symbol": sym,
             "verdict": "WAIT",
             "verdict_num": 0,
-            "message": "poller_store_empty",
+            "message": "poller_store_empty_or_stale",
             "data_source": "poller_store",
         }
 
@@ -29625,7 +29954,8 @@ async def get_gom_verdict(
                 "message": "GOM stale — is gom_verdict_poller running?"}
     # Fraîcheur déjà garantie par la sélection des fallbacks ci-dessus
     # (GOM_VERDICT_MAX_AGE_SEC, défaut 15s) — pas de verdict undaté ici.
-    flat = _build_gom_mt5_payload(verdict)
+    _gom_cached_or_schedule_cognition(sym, dict(verdict))
+    flat = _build_gom_mt5_payload(verdict, enrich=False)
     return _gom_family_guard_response(sym, {"ok": True, "symbol": sym, **flat}, for_execution=True)
 
 def _calculate_gom_verdict(score_buy: float, score_sell: float, coherence: float = 0, filter_ratio: float = 0, record: dict = None) -> tuple:
@@ -29655,10 +29985,17 @@ def _calculate_gom_verdict(score_buy: float, score_sell: float, coherence: float
         # Meme plancher de stabilite que gom_pine_calculator.enrich_record, pour
         # que le fallback ne diverge pas sur les familles Boom/Crash.
         _min_gap = float(_rec.get("bc_stability_applied") or 0.0)
-        vn = _gom_verdict_calc.calculate_verdict_num(
-            score_buy, score_sell, bool(coherence or 0),
-            abs(score_buy - score_sell), _rec, _min_gap
-        )
+        _gap = abs(score_buy - score_sell)
+        if hasattr(_gom_verdict_calc, "calculate_verdict_num"):
+            vn = _gom_verdict_calc.calculate_verdict_num(
+                score_buy, score_sell, bool(coherence or 0),
+                _gap, _rec, _min_gap
+            )
+        else:
+            vn = _gom_verdict_calc.calculate_verdict(
+                score_buy, score_sell, bool(coherence or 0),
+                _gap, _rec
+            )
         return (int(vn), _gom_verdict_calc.calculate_verdict_text(int(vn)))
 
     gap = abs(score_buy - score_sell)
@@ -32686,13 +33023,17 @@ if __name__ == "__main__":
 
     _abort_if_port_busy(HOST, API_PORT)
     try:
+        # limit_concurrency évite la mort du accept() quand 15+ charts MT5
+        # floodent upload-candles + /decision + /gom-* (SYN_SENT → WAIT partout).
         uvicorn.run(
             app,
             host=HOST,
             port=API_PORT,
             reload=False,
             log_level="info",
-            timeout_keep_alive=5,  # libérer les connexions idle plus vite
+            timeout_keep_alive=2,
+            limit_concurrency=int(os.getenv("UVICORN_LIMIT_CONCURRENCY", "64")),
+            backlog=int(os.getenv("UVICORN_BACKLOG", "2048")),
         )
     except OSError as bind_err:
         win = getattr(bind_err, "winerror", None) or getattr(bind_err, "errno", None)
@@ -32703,3 +33044,4 @@ if __name__ == "__main__":
             )
             sys.exit(1)
         raise
+
