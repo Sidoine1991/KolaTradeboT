@@ -26,8 +26,9 @@ try:
     from sklearn.metrics import accuracy_score, classification_report, roc_auc_score
     import xgboost as xgb
 except ImportError as e:
-    print(f"❌ Erreur import sklearn/xgboost: {e}")
-    sys.exit(1)
+    raise ImportError(
+        "Continuous learning requires scikit-learn and xgboost"
+    ) from e
 
 from backend.features import compute_features, EXPECTED_FEATURES
 from backend.adaptive_predict import get_symbol_category, MODEL_CONFIGS, create_adaptive_features, MODEL_FEATURES
