@@ -27,6 +27,7 @@ import contextlib
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional, List, Dict, Any, Tuple, Set, Union
+from backend.trade_statistics import build_strategy_trade_stats
 
 import socket
 import sys
@@ -168,6 +169,9 @@ load_dotenv(_root_dir / "python" / ".env")
 load_dotenv(_root_dir / ".env")
 load_dotenv(_root_dir / ".env.local")  # Override via local config
 load_dotenv()
+# Le poller est le seul client du terminal MT5. Ce processus lit les bougies
+# déjà uploadées par l'EA et n'appelle plus copy_rates (ça bloquait les deux).
+os.environ["GOM_SERVER_SKIP_DIRECT_MT5"] = "1"
 
 # === EARLY LOGGER INIT (before optional imports that log) ===
 logging.basicConfig(
@@ -3316,6 +3320,12 @@ def get_market_data_cloud(symbol: str, period: str = "5d", interval: str = "1m")
         if not symbol or symbol.strip().upper() in ("UNKNOWN", ""):
             logger.warning(f"Invalid symbol for {symbol}, returning empty DataFrame")
             return pd.DataFrame()
+        compact = symbol.strip().upper().replace(" ", "")
+        if any(k in compact for k in (
+            "PAINX", "GAINX", "FLIPX", "BOOM", "CRASH", "TRENDX", "BREAKX",
+            "QUADX", "FIBOX", "PLUSX", "VOLATILITY", "FXVOL", "SFVVOL", "SFXVOL", "STEP",
+        )):
+            return pd.DataFrame()
         
         # Mapping des symboles pour yfinance
         symbol_map = {
@@ -3594,6 +3604,8 @@ def get_mt5_indicators(symbol: str, timeframe: str, count: int = 100) -> Optiona
     Returns:
         Dictionnaire des indicateurs techniques ou None en cas d'erreur
     """
+    if os.getenv("GOM_SERVER_SKIP_DIRECT_MT5", "").strip().lower() in ("1", "true", "yes"):
+        return None
     try:
         sys.path.insert(0, str(Path(__file__).resolve().parent / "python"))
         from mt5_candles_fetcher import fetch_mt5_candles
@@ -6346,6 +6358,56 @@ else:
 
 LOG_FILE = Path("ai_server.log")
 FEEDBACK_FILE = DATA_DIR / "trade_feedback.jsonl"
+_FEEDBACK_FILE_LOCK = threading.Lock()
+
+
+def _read_local_trade_feedback() -> List[Dict[str, Any]]:
+    if not FEEDBACK_FILE.exists():
+        return []
+    rows: List[Dict[str, Any]] = []
+    seen_tickets = set()
+    with _FEEDBACK_FILE_LOCK:
+        try:
+            with FEEDBACK_FILE.open("r", encoding="utf-8") as handle:
+                for line in handle:
+                    try:
+                        row = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if not isinstance(row, dict):
+                        continue
+                    ticket = row.get("deal_ticket")
+                    if ticket is not None:
+                        ticket = str(ticket)
+                        if ticket in seen_tickets:
+                            continue
+                        seen_tickets.add(ticket)
+                    rows.append(row)
+        except OSError as exc:
+            logger.error("[TRADE-FEEDBACK] lecture locale impossible: %s", exc)
+    return rows
+
+
+def _append_local_trade_feedback(row: Dict[str, Any]) -> bool:
+    try:
+        with _FEEDBACK_FILE_LOCK:
+            FEEDBACK_FILE.parent.mkdir(parents=True, exist_ok=True)
+            ticket = row.get("deal_ticket")
+            if ticket is not None and FEEDBACK_FILE.exists():
+                with FEEDBACK_FILE.open("r", encoding="utf-8") as handle:
+                    for line in handle:
+                        try:
+                            existing = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        if isinstance(existing, dict) and str(existing.get("deal_ticket")) == str(ticket):
+                            return True
+            with FEEDBACK_FILE.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+        return True
+    except OSError as exc:
+        logger.error("[TRADE-FEEDBACK] écriture locale impossible: %s", exc)
+        return False
 
 if RUNNING_ON_SUPABASE:
     # Mode cloud: tout est stocké dans le répertoire data/ du serveur
@@ -10704,16 +10766,65 @@ def _gom_finalize_verdict_pipeline(out: dict, sym: str, chart_tf: str = "M15") -
     out["verdict_mode"] = "reactive_pine"
 
 
-def _gom_apply_strict_spike_trend_guard(out: dict, symbol: str) -> None:
-    """Garde finale : une microcorrection ne peut pas inverser la chaîne.
+def _gom_preserve_analytical_verdict(out: dict, analytical_vn: int) -> None:
+    """Garde le vrai verdict GOM visible. WAIT n'est autorisé qu'à l'exécution."""
+    try:
+        from gom_pine_calculator import verdict_text_from_num
+        txt = verdict_text_from_num(analytical_vn)
+    except Exception:
+        if analytical_vn >= 3:
+            txt = "PERFECT BUY"
+        elif analytical_vn <= -3:
+            txt = "PERFECT SELL"
+        elif analytical_vn == 2:
+            txt = "GOOD BUY"
+        elif analytical_vn == -2:
+            txt = "GOOD SELL"
+        elif analytical_vn == 1:
+            txt = "BUY"
+        elif analytical_vn == -1:
+            txt = "SELL"
+        else:
+            txt = "WAIT"
+    if analytical_vn != 0:
+        out["verdict_num"] = analytical_vn
+        out["verdict"] = txt
+        out.setdefault("verdict_server_num", analytical_vn)
+        out.setdefault("verdict_server", txt)
+        if int(out.get("verdict_server_num", 0) or 0) == 0:
+            out["verdict_server_num"] = analytical_vn
+            out["verdict_server"] = txt
 
-    Règle métier : si M1 et M5 restent BEAR, un rebond M1 temporaire ne doit
-    jamais fabriquer un GOOD BUY. Le serveur publie WAIT jusqu'à l'approche
-    d'une zone sensible; avec une chaîne active et une zone confirmée, il
-    publie alors le sens prédit de la chaîne (GOOD SELL ici).
+
+def _gom_pause_entry_keep_verdict(out: dict, reason: str, analytical_vn: int) -> None:
+    """Pause d'entrée sans overlay WAIT sur le verdict analytique."""
+    _gom_preserve_analytical_verdict(out, analytical_vn)
+    out["trend_guard"] = "WAIT"
+    out["trend_guard_reason"] = reason
+    out["trend_guard_original_verdict_num"] = analytical_vn
+    out["effective_verdict_num"] = 0
+    out["effective_verdict"] = "WAIT"
+    out["entry_allowed"] = False
+    out["entry_block_reason"] = reason
+    if "simple" not in reason:
+        out["correction_wait"] = True
+        out["correction_wait_reason"] = reason
+
+
+def _gom_apply_strict_spike_trend_guard(out: dict, symbol: str) -> None:
+    """Garde finale : pause d'exécution, jamais d'overlay WAIT sur le vrai GOM.
+
+    M1 NEUTRAL n'est pas une opposition. GOOD n'exige que M5. PERFECT tolère
+    un pullback M1 tant que M5 n'est pas contraire. Une microcorrection ne
+    fabrique pas un GOOD inverse, et n'efface plus un GOOD/PERFECT réel.
     """
     try:
-        vn = int(out.get("effective_verdict_num", out.get("verdict_num", 0)) or 0)
+        analytical_vn = int(out.get("verdict_server_num", out.get("verdict_num", 0)) or 0)
+        if analytical_vn == 0:
+            analytical_vn = int(out.get("verdict_num", 0) or 0)
+        vn = int(out.get("effective_verdict_num", analytical_vn) or 0)
+        if vn == 0:
+            vn = analytical_vn
 
         def _sign(value: Any) -> int:
             text = str(value or "").upper()
@@ -10723,21 +10834,21 @@ def _gom_apply_strict_spike_trend_guard(out: dict, symbol: str) -> None:
                 return -1
             return 0
 
+        def _verdict_text(num: int) -> str:
+            try:
+                from gom_pine_calculator import verdict_text_from_num
+                return verdict_text_from_num(num)
+            except Exception:
+                if num >= 2:
+                    return "GOOD BUY"
+                if num <= -2:
+                    return "GOOD SELL"
+                return "WAIT"
+
         m1 = _sign(out.get("tf_m1_dir_live") or out.get("tf_m1_dir"))
         m5 = _sign(out.get("tf_m5_dir"))
         chain = _sign(out.get("spike_chain_direction") or out.get("chain_direction"))
 
-        # FIX 2026-09-27 : le contrat de cette garde ("avec une chaîne active
-        # et une zone confirmée, il publie alors le sens prédit de la chaîne")
-        # ne s'appliquait en pratique JAMAIS à un WAIT d'origine (vn=0) — la
-        # fonction s'arrêtait ici avant même de regarder chain/M1/M5. Résultat
-        # : une chaîne de spike baissier confirmée (M1=M5=chain=SELL, zone
-        # atteinte) pouvait rester WAIT indéfiniment si le pipeline de score
-        # amont (quality/coherence, GOMVerdictCalculatorV2) n'avait produit
-        # aucun verdict directionnel à corriger. On ajoute ici le chemin
-        # d'ESCALADE symétrique au chemin de correction déjà existant plus
-        # bas (wrong_side) : WAIT -> GOOD BUY/SELL si la chaîne est active,
-        # proche d'une zone, et M1/M5 confirment tous les deux son sens.
         if vn == 0:
             dominant0 = chain if chain and bool(out.get("spike_chain_active", out.get("chain_active", False))) else 0
             if dominant0 == 0:
@@ -10758,55 +10869,40 @@ def _gom_apply_strict_spike_trend_guard(out: dict, symbol: str) -> None:
             if not (chain_active0 and near_zone0 and aligned0):
                 return
             new_vn0 = dominant0 * 2
-            try:
-                from gom_pine_calculator import verdict_text_from_num
-                new_txt0 = verdict_text_from_num(new_vn0)
-            except Exception:
-                new_txt0 = "GOOD BUY" if new_vn0 > 0 else "GOOD SELL"
+            new_txt0 = _verdict_text(new_vn0)
             out["trend_guard_original_verdict_num"] = 0
             out["trend_guard"] = "PREDICTED_GOOD_BUY" if dominant0 > 0 else "PREDICTED_GOOD_SELL"
             out["trend_guard_reason"] = "wait_escalated_chain_active+near_spike_zone+M1_M5_aligned"
             out["verdict_num"] = new_vn0
             out["verdict"] = new_txt0
+            out["verdict_server_num"] = new_vn0
+            out["verdict_server"] = new_txt0
             out["effective_verdict_num"] = new_vn0
             out["effective_verdict"] = new_txt0
             out["entry_allowed"] = True
+            out["correction_wait"] = False
             logger.info(
                 "[GOM-TREND-GUARD] %s: WAIT -> %s (%s)",
                 symbol, new_txt0, out["trend_guard_reason"],
             )
             return
 
-        # Contrat final : SIMPLE n'est jamais une autorisation et un verdict
-        # directionnel n'est publiable que si M1 et M5 confirment ce sens.
+        _gom_preserve_analytical_verdict(out, analytical_vn if analytical_vn != 0 else vn)
+
         if abs(vn) < MIN_GOM_VERDICT_NUM_ABS:
-            out["verdict_num"] = 0
-            out["verdict"] = "WAIT"
-            out["effective_verdict_num"] = 0
-            out["effective_verdict"] = "WAIT"
-            out["entry_allowed"] = False
-            out["trend_guard"] = "WAIT"
-            out["trend_guard_reason"] = "simple_verdict_forbidden"
+            _gom_pause_entry_keep_verdict(out, "simple_verdict_forbidden", vn)
             out["entry_block_reason"] = "GOOD/PERFECT requis; SIMPLE interdit"
             return
 
         verdict_dir = 1 if vn > 0 else -1
-        if m1 == 0 or m5 == 0 or m1 != verdict_dir or m5 != verdict_dir:
-            out["verdict_num"] = 0
-            out["verdict"] = "WAIT"
-            out["effective_verdict_num"] = 0
-            out["effective_verdict"] = "WAIT"
-            out["entry_allowed"] = False
-            out["correction_wait"] = True
-            out["trend_guard"] = "WAIT"
-            out["trend_guard_reason"] = "M1_M5_not_aligned_with_verdict"
-            out["correction_wait_reason"] = "M1/M5 doivent confirmer le sens GOM"
-            out["entry_block_reason"] = out["correction_wait_reason"]
+        m5_opposes = m5 != 0 and m5 != verdict_dir
+        if m5_opposes:
+            _gom_pause_entry_keep_verdict(
+                out, "M5_opposes_verdict", analytical_vn if analytical_vn != 0 else vn
+            )
             return
 
         dominant = chain if chain and bool(out.get("spike_chain_active", out.get("chain_active", False))) else 0
-        # M5 est la tendance de référence; M1 peut temporairement imprimer
-        # une bougie opposée pendant le pullback.
         if dominant == 0 and m5:
             dominant = m5
         if dominant == 0 and m1:
@@ -10825,8 +10921,6 @@ def _gom_apply_strict_spike_trend_guard(out: dict, symbol: str) -> None:
             or out.get("correction_wait")
             or int(out.get("m1_opp_bars", 0) or 0) >= 2
         )
-        # Un conflit M1/M5 est toujours bloquant, même si le fournisseur n'a
-        # pas encore marqué explicitement active_correction.
         if m1 == -dominant or m5 == -dominant:
             correction = True
         if not correction:
@@ -10849,30 +10943,31 @@ def _gom_apply_strict_spike_trend_guard(out: dict, symbol: str) -> None:
         out["trend_guard_original_verdict_num"] = old_vn
         if chain_active and near_zone and aligned:
             new_vn = dominant * 2
+            new_txt = _verdict_text(new_vn)
             out["trend_guard"] = "PREDICTED_GOOD_BUY" if dominant > 0 else "PREDICTED_GOOD_SELL"
             out["trend_guard_reason"] = "chain_active+near_spike_zone+M1_M5_aligned"
-        else:
-            new_vn = 0
-            out["trend_guard"] = "WAIT"
-            out["trend_guard_reason"] = "opposite_verdict_during_microcorrection"
+            out["verdict_num"] = new_vn
+            out["verdict"] = new_txt
+            out["verdict_server_num"] = new_vn
+            out["verdict_server"] = new_txt
+            out["effective_verdict_num"] = new_vn
+            out["effective_verdict"] = new_txt
+            out["entry_allowed"] = True
+            out["correction_wait"] = False
+            logger.info(
+                "[GOM-TREND-GUARD] %s: vn=%s -> %s (%s)",
+                symbol, old_vn, new_txt, out["trend_guard_reason"],
+            )
+            return
 
-        try:
-            from gom_pine_calculator import verdict_text_from_num
-            new_txt = verdict_text_from_num(new_vn)
-        except Exception:
-            new_txt = "WAIT" if new_vn == 0 else ("GOOD BUY" if new_vn > 0 else "GOOD SELL")
-        out["verdict_num"] = new_vn
-        out["verdict"] = new_txt
-        out["effective_verdict_num"] = new_vn
-        out["effective_verdict"] = new_txt
-        out["entry_allowed"] = new_vn != 0
-        if new_vn == 0:
-            out["correction_wait"] = True
-            out["correction_wait_reason"] = out["trend_guard_reason"]
-            out["entry_block_reason"] = out["trend_guard_reason"]
+        _gom_pause_entry_keep_verdict(
+            out,
+            "opposite_verdict_during_microcorrection",
+            analytical_vn if analytical_vn != 0 else old_vn,
+        )
         logger.info(
-            "[GOM-TREND-GUARD] %s: vn=%s -> %s (%s)",
-            symbol, old_vn, new_txt, out["trend_guard_reason"],
+            "[GOM-TREND-GUARD] %s: keep vn=%s, entry paused (%s)",
+            symbol, old_vn, out.get("trend_guard_reason"),
         )
     except Exception as exc:
         logger.debug("[GOM-TREND-GUARD] %s failed: %s", symbol, exc)
@@ -11478,8 +11573,47 @@ def _get_gom_bridge():
     """
     return None
 
+def _gom_preserve_store_verdict_over_live_wait(resp: dict, sym: str) -> None:
+    """Ne pas publier WAIT live par-dessus un vrai verdict poller/store.
+
+    L'attache de l'EA uploade des M1 et déclenche un recalcul dashboard.
+    Ce recalcul peut sortir WAIT alors que le store a déjà GOOD/PERFECT.
+    On conserve le verdict analytique du store pour l'affichage et l'EA.
+    """
+    if not isinstance(resp, dict):
+        return
+    live_vn = int(resp.get("verdict_num", 0) or 0)
+    store = _lookup_gom_store(str(sym or resp.get("symbol") or "").upper(), _GOM_VERDICT_STORE) or {}
+    if not store:
+        return
+    store_vn = int(store.get("verdict_server_num", 0) or 0)
+    if store_vn == 0:
+        store_vn = int(store.get("verdict_num", 0) or 0)
+    if abs(store_vn) < 1:
+        return
+    if live_vn != 0 and abs(live_vn) >= abs(store_vn):
+        resp.setdefault("verdict_server_num", store_vn)
+        resp.setdefault("verdict_server", store.get("verdict_server") or store.get("verdict"))
+        return
+    txt = str(store.get("verdict_server") or store.get("verdict") or "WAIT")
+    resp["verdict_server_num"] = store_vn
+    resp["verdict_server"] = txt
+    if live_vn == 0:
+        resp["verdict_num"] = store_vn
+        resp["verdict"] = txt
+        resp["data_source"] = str(resp.get("data_source") or "") + "+store_keep"
+        logger.info(
+            "[GOM-DASH] %s live WAIT — conserve store %s (vn=%s)",
+            sym, txt, store_vn,
+        )
+
+
 def _cache_gom_data(symbol: str, data: Dict[str, Any], chart_tf: str = "M15"):
     """Cache les données GOM avec timestamp"""
+    if isinstance(data, dict) and int(data.get("verdict_num", 0) or 0) == 0:
+        store = _lookup_gom_store(str(symbol or "").upper(), _GOM_VERDICT_STORE) or {}
+        if abs(int(store.get("verdict_num", 0) or 0)) >= 1:
+            return
     key = _gom_cache_key(symbol, chart_tf)
     _gom_cache[key] = {
         "data": data,
@@ -11551,6 +11685,7 @@ async def _compute_gom_dashboard(sym: str, chart_tf: str, source: str, src_norm:
             )
         except asyncio.TimeoutError:
             logger.debug(f"[GOM-DASH] {sym} post-compute enrich timeout")
+        _gom_preserve_store_verdict_over_live_wait(response, sym)
         response["_finalize_at"] = time.time()
         _cache_gom_data(sym, response, chart_tf)
     return response
@@ -12905,6 +13040,8 @@ def get_recent_historical_data(symbol: str, num_bars: int = 200) -> pd.DataFrame
 def get_historical_data_mt5(symbol: str, timeframe: str = "H1", count: int = 500):
     """Récupère les données historiques depuis MT5. Retourne None si MT5 indisponible (ex: Render)."""
     global mt5_initialized
+    if os.getenv("GOM_SERVER_SKIP_DIRECT_MT5", "").strip().lower() in ("1", "true", "yes"):
+        return None
     if not MT5_AVAILABLE:
         return None
     if not mt5_initialized:
@@ -20914,7 +21051,11 @@ async def spike_levels(symbol: str, limit: int = 30):
 class TradeFeedbackRequest(BaseModel):
     symbol: str
     timeframe: Optional[str] = "M1"
+    deal_ticket: Optional[int] = None
+    position_id: Optional[int] = None
+    position_complete: Optional[bool] = None
     side: Optional[str] = None  # "buy" | "sell"
+    entry_comment: Optional[str] = None
     profit: float
     is_win: bool
     ai_confidence: Optional[float] = None  # 0..1 (optional)
@@ -20972,9 +21113,48 @@ async def _refresh_symbol_trade_stats(timeframe: str = "M1") -> None:
     Définition WIN/LOSS alignée avec MT5: profit > 0 / profit < 0.
     Périodes: UTC.
     """
+    global _symbol_stats_last_tick
     supabase_url = os.getenv("SUPABASE_URL", "").strip()
     supabase_key = (os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_SERVICE_KEY") or os.getenv("SUPABASE_ANON_KEY") or "").strip()
     if not supabase_url or not supabase_key:
+        now = datetime.now(timezone.utc)
+        day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        cache: Dict[str, Dict[str, Any]] = {}
+        for row in _read_local_trade_feedback():
+            symbol = str(row.get("symbol") or "")
+            if not symbol:
+                continue
+            try:
+                profit = float(row.get("profit") or 0.0)
+                close_time = datetime.fromisoformat(
+                    str(row.get("close_time") or row.get("created_at") or "").replace("Z", "+00:00")
+                )
+                if close_time.tzinfo is None:
+                    close_time = close_time.replace(tzinfo=timezone.utc)
+            except (TypeError, ValueError):
+                continue
+            for period_type, period_start in (("day", day_start), ("month", month_start)):
+                if close_time < period_start or close_time > now:
+                    continue
+                stats = cache.setdefault(symbol, {}).setdefault(period_type, {
+                    "trade_count": 0, "wins": 0, "losses": 0,
+                    "net_profit": 0.0, "gross_profit": 0.0, "gross_loss": 0.0,
+                    "last_trade_at": None,
+                })
+                stats["trade_count"] += 1
+                if profit > 0.0:
+                    stats["wins"] += 1
+                    stats["gross_profit"] += profit
+                elif profit < 0.0:
+                    stats["losses"] += 1
+                    stats["gross_loss"] += -profit
+                stats["net_profit"] += profit
+                if stats["last_trade_at"] is None or close_time > stats["last_trade_at"]:
+                    stats["last_trade_at"] = close_time
+        _symbol_stats_cache.clear()
+        _symbol_stats_cache.update(cache)
+        _symbol_stats_last_tick = now.isoformat()
         return
 
     import httpx
@@ -21407,6 +21587,27 @@ async def trades_feedback(request: TradeFeedbackRequest):
         processed_open = process_time(request.open_time)
         processed_close = process_time(request.close_time)
         processed_ts = process_time(request.timestamp) or datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        local_feedback_saved = _append_local_trade_feedback({
+            "deal_ticket": request.deal_ticket,
+            "position_id": request.position_id,
+            "position_complete": request.position_complete,
+            "symbol": symbol,
+            "timeframe": tf,
+            "side": (request.side or "").upper(),
+            "entry_comment": request.entry_comment,
+            "decision": (request.side or "UNKNOWN").upper(),
+            "profit": float(request.profit),
+            "is_win": bool(request.is_win),
+            "ai_confidence": request.ai_confidence,
+            "coherent_confidence": request.coherent_confidence,
+            "entry_price": request.entry_price,
+            "exit_price": request.exit_price,
+            "open_time": processed_open,
+            "close_time": processed_close,
+            "created_at": processed_ts,
+        })
+        if not local_feedback_saved:
+            logger.error("[TRADE-FEEDBACK] feedback non persisté localement pour %s", symbol)
 
         # Mise à jour du buffer mémoire
         buf = _get_feedback_buf(symbol, tf)
@@ -21539,6 +21740,11 @@ async def trades_feedback(request: TradeFeedbackRequest):
     except Exception as e:
         logger.error(f"Erreur /trades/feedback: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/trades/strategy-stats")
+async def trades_strategy_stats(days: int = 30):
+    """Local net outcomes grouped by symbol and entry strategy."""
+    return build_strategy_trade_stats(_read_local_trade_feedback(), days)
 
 @app.get("/ml/metrics")
 async def ml_metrics(symbol: str, timeframe: str = "M1"):
@@ -22639,10 +22845,78 @@ async def get_feedback_status():
     Retourne des statistiques sur les trades enregistrés pour le monitoring
     """
     if not DB_AVAILABLE:
+        rows = _read_local_trade_feedback()
+        min_samples = continuous_learner.min_new_samples if CONTINUOUS_LEARNING_AVAILABLE and continuous_learner else 30
+        now = datetime.now(timezone.utc)
+        recent_cutoff = now - timedelta(days=7)
+        totals = {"trades": 0, "wins": 0, "profit": 0.0}
+        by_category: Dict[str, Dict[str, Any]] = {}
+        normalized_rows = []
+        for row in rows:
+            try:
+                profit = float(row.get("profit") or 0.0)
+            except (TypeError, ValueError):
+                continue
+            symbol = str(row.get("symbol") or "")
+            try:
+                from backend.continuous_learning import map_symbol_to_trading_category
+                category = map_symbol_to_trading_category(symbol)
+            except Exception:
+                category = "COMMODITIES"
+            is_win = bool(row.get("is_win"))
+            totals["trades"] += 1
+            totals["wins"] += int(is_win)
+            totals["profit"] += profit
+            bucket = by_category.setdefault(category, {"count": 0, "wins": 0, "total_profit": 0.0})
+            bucket["count"] += 1
+            bucket["wins"] += int(is_win)
+            bucket["total_profit"] += profit
+            created_at = row.get("created_at") or row.get("timestamp")
+            try:
+                created_dt = datetime.fromisoformat(str(created_at).replace("Z", "+00:00"))
+                if created_dt.tzinfo is None:
+                    created_dt = created_dt.replace(tzinfo=timezone.utc)
+                if created_dt >= recent_cutoff:
+                    totals.setdefault("recent", 0)
+                    totals["recent"] += 1
+            except (TypeError, ValueError):
+                pass
+            normalized_rows.append({
+                "symbol": symbol,
+                "decision": row.get("decision") or row.get("side") or "UNKNOWN",
+                "profit": profit,
+                "is_win": is_win,
+                "created_at": created_at,
+            })
+        for category_data in by_category.values():
+            category_data["ready_for_retraining"] = category_data["count"] >= min_samples
+
         return {
-            "status": "error",
-            "error": "Base de données non disponible - DATABASE_URL non configurée",
-            "db_available": False
+            "status": "ok",
+            "db_available": False,
+            "data_source": "local_jsonl",
+            "statistics": {
+                "total_trades": totals["trades"],
+                "total_wins": totals["wins"],
+                "total_losses": totals["trades"] - totals["wins"],
+                "win_rate": round(100.0 * totals["wins"] / totals["trades"], 2) if totals["trades"] else 0.0,
+                "total_profit": round(totals["profit"], 2),
+                "recent_trades_7d": totals.get("recent", 0),
+                "min_samples_for_retraining": min_samples,
+            },
+            "trades_by_category": by_category,
+            "last_trades": sorted(
+                normalized_rows, key=lambda row: str(row.get("created_at") or ""), reverse=True
+            )[:10],
+            "continuous_learning": {
+                "available": CONTINUOUS_LEARNING_AVAILABLE,
+                "database_available": False,
+                "local_feedback_available": FEEDBACK_FILE.exists(),
+                "loop_enabled": AI_ENABLE_CONTINUOUS_LEARNING_LOOP,
+                "loop_running": _continuous_learning_bg_task is not None and not _continuous_learning_bg_task.done(),
+                "min_samples": min_samples,
+                "retrain_interval_days": continuous_learner.retrain_interval_days if CONTINUOUS_LEARNING_AVAILABLE and continuous_learner else None,
+            },
         }
     
     try:
@@ -22841,6 +23115,9 @@ async def get_retraining_stats():
                 "min_new_samples": continuous_learner.min_new_samples,
                 "retrain_interval_days": continuous_learner.retrain_interval_days
             },
+            "background_loop_enabled": AI_ENABLE_CONTINUOUS_LEARNING_LOOP,
+            "background_loop_running": _continuous_learning_bg_task is not None and not _continuous_learning_bg_task.done(),
+            "local_feedback_samples": len(_read_local_trade_feedback()),
             "retraining_status": retrain_stats
         }
         
@@ -33044,4 +33321,3 @@ if __name__ == "__main__":
             )
             sys.exit(1)
         raise
-
