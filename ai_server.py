@@ -28,6 +28,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional, List, Dict, Any, Tuple, Set, Union
 from backend.trade_statistics import build_strategy_trade_stats
+from mt5_candle_validation import normalize_mt5_candles
 
 import socket
 import sys
@@ -373,6 +374,26 @@ except ImportError as e:
     AWS_RDS_AVAILABLE = False
     logger.warning(f"⚠️ AWS RDS helper non disponible: {e}")
 
+# Import du module d'analyse Shadow ICT
+try:
+    from shadow_analyzer import ShadowAnalyzer, shadow_analyzer, periodic_shadow_analysis
+    SHADOW_ANALYZER_AVAILABLE = True
+    logger.info("✅ Module d'analyse Shadow ICT chargé")
+except ImportError as e:
+    SHADOW_ANALYZER_AVAILABLE = False
+    shadow_analyzer = None
+    logger.warning(f"⚠️ Module d'analyse Shadow ICT non disponible: {e}")
+
+# Import du moteur de décision unifié (Profittown + ICT + Shadow)
+try:
+    from unified_decision_engine import UnifiedDecisionEngine, unified_engine
+    UNIFIED_DECISION_AVAILABLE = True
+    logger.info("✅ Moteur de décision unifié chargé (Profittown + ICT + Shadow)")
+except ImportError as e:
+    UNIFIED_DECISION_AVAILABLE = False
+    unified_engine = None
+    logger.warning(f"⚠️ Moteur de décision unifié non disponible: {e}")
+
 try:
     from gom_path_prediction import apply_path_to_gom_record, infer_tv_setup_from_gom
     GOM_PATH_AVAILABLE = True
@@ -407,6 +428,52 @@ else:
         from integrated_ml_trainer import ml_trainer
         ML_TRAINER_AVAILABLE = True
         logger.info("🤖 Système d'entraînement continu intégré chargé")
+
+        def _install_ml_trainer_cache(trainer, ttl_models: float = 120.0, ttl_metrics: float = 30.0) -> None:
+            """
+            FIX 2026-11-12: load_existing_models()/get_current_metrics() relisaient TOUS les
+            .joblib + *_metrics.json (des dizaines de "Modèle chargé") a chaque appel, y compris
+            sur /decision (11 s) et /ml/metrics (5 s). Resultat mis en cache (TTL court).
+            Appeler ml_trainer.invalidate_model_cache() apres un reentrainement.
+            """
+            _lock = threading.RLock()
+            _store: Dict[Any, Any] = {}
+
+            def _wrap(name: str, ttl: float) -> None:
+                orig = getattr(trainer, name, None)
+                if not callable(orig) or getattr(orig, "_nyao_cached", False):
+                    return
+                if asyncio.iscoroutinefunction(orig):
+                    return  # on ne met en cache que les versions synchrones
+
+                def cached(*a, **kw):
+                    key = (name, repr(a), repr(sorted(kw.items())))
+                    with _lock:
+                        hit = _store.get(key)
+                        if hit and (time.time() - hit[0]) < ttl:
+                            return hit[1]
+                    res = orig(*a, **kw)
+                    with _lock:
+                        _store[key] = (time.time(), res)
+                    return res
+
+                cached._nyao_cached = True  # type: ignore[attr-defined]
+                setattr(trainer, name, cached)
+
+            _wrap("load_existing_models", ttl_models)
+            _wrap("get_current_metrics", ttl_metrics)
+
+            def _invalidate() -> None:
+                with _lock:
+                    _store.clear()
+
+            trainer.invalidate_model_cache = _invalidate  # type: ignore[attr-defined]
+
+        try:
+            _install_ml_trainer_cache(ml_trainer)
+            logger.info("🧠 Cache modèles ML actif (load_existing_models 120s, get_current_metrics 30s)")
+        except Exception as _cache_err:
+            logger.warning(f"⚠️ Cache modèles ML non installé: {_cache_err}")
     except (ImportError, OSError) as e:
         logger.warning(f"⚠️ Système d'entraînement continu non disponible: {e}")
 
@@ -4928,7 +4995,18 @@ async def _log_validation_errors(request: Request, exc: RequestValidationError):
             path,
             exc.errors(),
         )
-    return JSONResponse(status_code=422, content={"detail": exc.errors()})
+    # Convert bytes to strings for JSON serialization
+    errors = exc.errors()
+    def convert_bytes_to_str(obj):
+        if isinstance(obj, bytes):
+            return obj.decode('utf-8', errors='replace')
+        elif isinstance(obj, dict):
+            return {k: convert_bytes_to_str(v) for k, v in obj.items()}
+        elif isinstance(obj, list):
+            return [convert_bytes_to_str(item) for item in obj]
+        return obj
+    errors_serializable = convert_bytes_to_str(errors)
+    return JSONResponse(status_code=422, content={"detail": errors_serializable})
 
 
 @app.exception_handler(Exception)
@@ -10691,45 +10769,29 @@ def _gom_finalize_verdict_pipeline(out: dict, sym: str, chart_tf: str = "M15") -
             out.setdefault("verdict_server_num", inverted_vn)
             out.setdefault("verdict_server", verdict_text_from_num(inverted_vn))
         if gated_vn != inverted_vn:
-            # FIX 2026-09-06: ne JAMAIS écraser le vrai verdict calculé en WAIT.
-            # Bloquer uniquement l'exécution (effective / entry_allowed).
-            # L'EA reçoit verdict_num = calculé + effective_verdict_num pour le trade.
-            sym_u = str(out.get("symbol", "") or "").upper().replace(" ", "")
-            is_bc = any(x in sym_u for x in ("BOOM", "CRASH", "PAINX", "GAINX"))
-            sb = float(out.get("score_buy", 0) or 0)
-            ss = float(out.get("score_sell", 0) or 0)
-            native_ok = (
-                (inverted_vn > 0 and sb >= ss - 0.2) or
-                (inverted_vn < 0 and ss >= sb - 0.2)
-            )
-            out["m1_execution_blocked"] = True
-            out["m1_execution_block_reason"] = (
-                "M1 gate soft-block (synth, structure alive)"
-                if (is_bc and inverted_vn != 0 and gated_vn == 0 and native_ok)
-                else f"M1 execution gate vn={inverted_vn}->{gated_vn}"
-            )
-            out["entry_allowed"] = False
+            # Le chiffre affiché et tradé est celui qui colle au prix M1.
+            # Le score d'origine reste dans verdict_server_* pour le diagnostic.
+            # |vn|>=2 reste exécutable : un PERFECT→GOOD n'est pas un blocage.
             out["verdict_server_num"] = inverted_vn if inverted_vn != 0 else out.get("verdict_server_num", 0)
             out["verdict_server"] = (
                 verdict_text_from_num(inverted_vn) if inverted_vn != 0
                 else out.get("verdict_server", "WAIT")
             )
-            # effective seulement pour le trade ; verdict principal reste analytique
+            out["verdict_num"] = gated_vn
+            out["verdict"] = verdict_text_from_num(gated_vn)
             out["effective_verdict_num"] = gated_vn
             out["effective_verdict"] = verdict_text_from_num(gated_vn)
-            if inverted_vn != 0:
-                # Conserver le vrai verdict pour l'EA (affichage + direction)
-                out["verdict_num"] = inverted_vn
-                out["verdict"] = verdict_text_from_num(inverted_vn)
+            tradable = abs(gated_vn) >= 2
+            out["entry_allowed"] = tradable
+            out["m1_execution_blocked"] = not tradable
+            out["m1_execution_block_reason"] = (
+                f"M1 execution gate vn={inverted_vn}->{gated_vn}"
+            )
+            if tradable:
+                out["correction_wait"] = False
             else:
-                out["verdict_num"] = gated_vn
-                out["verdict"] = verdict_text_from_num(gated_vn)
-            if gated_vn == 0 and inverted_vn != 0:
                 out["correction_wait"] = True
-                out.setdefault(
-                    "correction_wait_reason",
-                    out.get("m1_execution_block_reason") or "M1 execution gate",
-                )
+                out["correction_wait_reason"] = out["m1_execution_block_reason"]
     except Exception as exc:
         # FIX 2026-09-04: ne JAMAIS forcer WAIT sur exception — conserver vn
         logger.warning(f"[GOM-M1-GATE] inversion non validée (vn conservé): {exc}")
@@ -10766,32 +10828,39 @@ def _gom_finalize_verdict_pipeline(out: dict, sym: str, chart_tf: str = "M15") -
     out["verdict_mode"] = "reactive_pine"
 
 
-def _gom_preserve_analytical_verdict(out: dict, analytical_vn: int) -> None:
-    """Garde le vrai verdict GOM visible. WAIT n'est autorisé qu'à l'exécution."""
+def _gom_verdict_label(vn: int) -> str:
     try:
         from gom_pine_calculator import verdict_text_from_num
-        txt = verdict_text_from_num(analytical_vn)
+        return verdict_text_from_num(vn)
     except Exception:
-        if analytical_vn >= 3:
-            txt = "PERFECT BUY"
-        elif analytical_vn <= -3:
-            txt = "PERFECT SELL"
-        elif analytical_vn == 2:
-            txt = "GOOD BUY"
-        elif analytical_vn == -2:
-            txt = "GOOD SELL"
-        elif analytical_vn == 1:
-            txt = "BUY"
-        elif analytical_vn == -1:
-            txt = "SELL"
-        else:
-            txt = "WAIT"
-    if analytical_vn != 0:
+        if vn >= 3:
+            return "PERFECT BUY"
+        if vn <= -3:
+            return "PERFECT SELL"
+        if vn == 2:
+            return "GOOD BUY"
+        if vn == -2:
+            return "GOOD SELL"
+        if vn == 1:
+            return "BUY"
+        if vn == -1:
+            return "SELL"
+        return "WAIT"
+
+
+def _gom_preserve_analytical_verdict(out: dict, analytical_vn: int) -> None:
+    """Garde le verdict déjà aligné sur le prix. Ne réaffiche pas un ancien PERFECT."""
+    current = int(out.get("verdict_num", 0) or 0)
+    price_demoted = bool(
+        out.get("price_reality_reason") or out.get("m1_execution_blocked")
+    )
+    if price_demoted and abs(current) < abs(analytical_vn):
+        analytical_vn = current
+    txt = _gom_verdict_label(analytical_vn)
+    if analytical_vn != 0 or price_demoted:
         out["verdict_num"] = analytical_vn
         out["verdict"] = txt
-        out.setdefault("verdict_server_num", analytical_vn)
-        out.setdefault("verdict_server", txt)
-        if int(out.get("verdict_server_num", 0) or 0) == 0:
+        if int(out.get("verdict_server_num", 0) or 0) == 0 and analytical_vn != 0:
             out["verdict_server_num"] = analytical_vn
             out["verdict_server"] = txt
 
@@ -10819,12 +10888,15 @@ def _gom_apply_strict_spike_trend_guard(out: dict, symbol: str) -> None:
     fabrique pas un GOOD inverse, et n'efface plus un GOOD/PERFECT réel.
     """
     try:
-        analytical_vn = int(out.get("verdict_server_num", out.get("verdict_num", 0)) or 0)
+        published = int(out.get("verdict_num", 0) or 0)
+        blocked = bool(out.get("m1_execution_blocked") or out.get("price_reality_reason"))
+        analytical_vn = int(out.get("verdict_server_num", published) or 0)
         if analytical_vn == 0:
-            analytical_vn = int(out.get("verdict_num", 0) or 0)
-        vn = int(out.get("effective_verdict_num", analytical_vn) or 0)
-        if vn == 0:
-            vn = analytical_vn
+            analytical_vn = published
+        # Un WAIT déjà produit par le prix ne redevient pas le PERFECT du score.
+        if published == 0 and blocked:
+            return
+        vn = published if published != 0 else analytical_vn
 
         def _sign(value: Any) -> int:
             text = str(value or "").upper()
@@ -10897,8 +10969,24 @@ def _gom_apply_strict_spike_trend_guard(out: dict, symbol: str) -> None:
         verdict_dir = 1 if vn > 0 else -1
         m5_opposes = m5 != 0 and m5 != verdict_dir
         if m5_opposes:
+            try:
+                d1 = float(out.get("price_direction_1b", 0) or 0)
+                d3 = float(out.get("price_direction_3b", 0) or 0)
+            except (TypeError, ValueError):
+                d1, d3 = 0.0, 0.0
+            price_with = (verdict_dir > 0 and d1 > 0 and d3 > 0) or (
+                verdict_dir < 0 and d1 < 0 and d3 < 0
+            )
+            # M5 en retard sur un prix M1 déjà dans le sens : on entre.
+            if (m1 == verdict_dir or price_with) and abs(vn) >= 2:
+                out["entry_allowed"] = True
+                out["correction_wait"] = False
+                out["effective_verdict_num"] = vn
+                out["effective_verdict"] = _verdict_text(vn)
+                out["trend_guard_reason"] = "m5_lag_price_confirms"
+                return
             _gom_pause_entry_keep_verdict(
-                out, "M5_opposes_verdict", analytical_vn if analytical_vn != 0 else vn
+                out, "M5_opposes_verdict", published if published != 0 else vn
             )
             return
 
@@ -10986,22 +11074,23 @@ def _gom_apply_price_reality_final(out: dict, symbol: str) -> None:
         if new_vn == vn and not reason:
             return
         out["price_reality_reason"] = reason
-        # Gate AND prix : rétrograde UNIQUEMENT l'exécution (effective_*).
-        # verdict_num / verdict_server_* restent le vrai verdict calculé.
-        orig_vn = int(out.get("verdict_server_num", out.get("verdict_reactive_num", 0)) or 0)
-        if orig_vn == 0:
-            orig_vn = int(out.get("verdict_num", vn) or 0)
+        score_vn = int(out.get("verdict_server_num", 0) or 0)
+        if score_vn == 0:
+            score_vn = int(out.get("verdict_num", vn) or 0)
+            out["verdict_server_num"] = score_vn
+            out["verdict_server"] = verdict_text_from_num(score_vn)
+        out["verdict_num"] = new_vn
+        out["verdict"] = verdict_text_from_num(new_vn)
         out["effective_verdict_num"] = new_vn
         out["effective_verdict"] = verdict_text_from_num(new_vn)
-        if orig_vn != 0:
-            out["verdict_num"] = orig_vn
-            out["verdict"] = verdict_text_from_num(orig_vn)
-            out["verdict_server_num"] = orig_vn
-            out["verdict_server"] = verdict_text_from_num(orig_vn)
-        if new_vn == 0 and orig_vn != 0:
+        tradable = abs(new_vn) >= 2
+        out["entry_allowed"] = tradable
+        out["m1_execution_blocked"] = not tradable
+        if tradable:
+            out["correction_wait"] = False
+        else:
             out["correction_wait"] = True
-            out.setdefault("correction_wait_reason", reason or "price reality gate")
-            out["entry_allowed"] = False
+            out["correction_wait_reason"] = reason or "price reality gate"
         out["harmonized_m1"] = True
         out["verdict_mode"] = "reactive_pine"
     except Exception as exc:
@@ -11120,8 +11209,11 @@ def _gom_m1_wait_threshold_for_symbol(symbol: str) -> float:
 
     - GOM_M1_WAIT_DOLLARS défini → override global (0 = off partout)
     - Boom/Crash/PainX/GainX/Vol : GOM_M1_WAIT_SYNTH (défaut 0 = off)
-    - XAU/XAG : GOM_M1_WAIT_METALS (défaut 5.0)
-    - Forex / autres : GOM_M1_WAIT_FOREX (défaut 0 = off)
+    - XAU/Or : GOM_M1_WAIT_GOLD, fallback GOM_M1_WAIT_FOREX (défaut 0 = off,
+      FIX 2026-11-08 — aligné sur Forex/Crypto à la demande de l'utilisateur ;
+      avant: 5.0 (actif), seule classe d'actif avec ce filtre M1 par défaut)
+    - XAG/Argent : GOM_M1_WAIT_METALS (défaut 5.0, comportement inchangé)
+    - Forex / Crypto / autres : GOM_M1_WAIT_FOREX (défaut 0 = off)
     """
     env = os.getenv("GOM_M1_WAIT_DOLLARS")
     if env is not None and str(env).strip() != "":
@@ -11136,7 +11228,9 @@ def _gom_m1_wait_threshold_for_symbol(symbol: str) -> float:
         "FLIPX", "SWITCHX", "PLUSX", "FIBOX", "QUADX", "RANGEX",
     )):
         return float(os.getenv("GOM_M1_WAIT_SYNTH", "0"))
-    if any(x in s for x in ("XAU", "GOLD", "XAG", "SILVER")):
+    if any(x in s for x in ("XAU", "GOLD")):
+        return float(os.getenv("GOM_M1_WAIT_GOLD", os.getenv("GOM_M1_WAIT_FOREX", "0")))
+    if any(x in s for x in ("XAG", "SILVER")):
         return float(os.getenv("GOM_M1_WAIT_METALS", "5.0"))
     return float(os.getenv("GOM_M1_WAIT_FOREX", "0"))
 
@@ -12205,22 +12299,18 @@ async def mt5_upload_candles(http_request: Request):
         timeframe = str(payload.get("timeframe") or "M1")
         candles_list = payload.get("candles") or []
         symbol = _resolve_symbol(raw_symbol) or raw_symbol
-        candles_raw = []
-        for c in candles_list:
-            if isinstance(c, dict):
-                candles_raw.append((
-                    int(c.get("time") or 0),
-                    float(c.get("open") or 0),
-                    float(c.get("high") or 0),
-                    float(c.get("low") or 0),
-                    float(c.get("close") or 0),
-                    float(c.get("volume") or 0),
-                ))
-            elif isinstance(c, (list, tuple)) and len(c) >= 5:
-                candles_raw.append((
-                    int(c[0]), float(c[1]), float(c[2]), float(c[3]), float(c[4]),
-                    float(c[5]) if len(c) > 5 else 0.0,
-                ))
+        try:
+            candles_raw, candle_validation = normalize_mt5_candles(candles_list)
+        except ValueError as validation_error:
+            return JSONResponse(
+                status_code=422,
+                content={
+                    "ok": False,
+                    "error": str(validation_error),
+                    "symbol": symbol,
+                    "timeframe": timeframe,
+                },
+            )
 
         if not candles_raw:
             return JSONResponse(
@@ -12278,7 +12368,11 @@ async def mt5_upload_candles(http_request: Request):
                     if cache_key.split(":")[0].upper() == sym_upper:
                         del _gom_cache[cache_key]
 
-                logger.info(f"✅ MT5 candles received: {symbol} {timeframe}→{canon} ({len(df)} candles)")
+                logger.info(
+                    f"✅ MT5 candles received: {symbol} {timeframe}→{canon} ({len(df)} valid; "
+                    f"{candle_validation['invalid_candles_dropped']} invalid, "
+                    f"{candle_validation['duplicate_candles_dropped']} duplicate dropped)"
+                )
                 logger.debug(f"   Last candle: {df['close'].iloc[-1]:.2f} @ {df.index[-1]}")
 
                 spike_chain_alerts = []
@@ -12330,6 +12424,7 @@ async def mt5_upload_candles(http_request: Request):
                     "symbol": symbol,
                     "timeframe": timeframe,
                     "candles_count": len(df),
+                    **candle_validation,
                     "last_price": float(df['close'].iloc[-1]),
                     "spike_chain_alerts": len(spike_chain_alerts),
                     "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -12351,6 +12446,125 @@ async def mt5_upload_candles(http_request: Request):
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             },
         )
+
+
+class _BatchSubRequest:
+    """Mini-requete: permet de reutiliser mt5_upload_candles() tel quel pour chaque timeframe."""
+    def __init__(self, payload: dict):
+        self._payload = payload
+
+    async def json(self):
+        return self._payload
+
+
+_BATCH_TF_ALIASES = {
+    "1": "M1", "5": "M5", "15": "M15", "30": "M30", "60": "H1", "240": "H4",
+    "D": "D1", "1D": "D1", "W": "W1",
+}
+
+
+def _extract_batch_items(payload: Any) -> Tuple[str, List[Tuple[str, Any]]]:
+    """
+    Accepte plusieurs formats d'envoi groupe (l'EA envoie M1/M5/M15/H1/H4/D1 en un POST):
+      A) {"symbol": "XAUUSD", "timeframes": {"M1": [...], "M5": [...]}}   (aussi cles: data, tfs, candles_by_tf)
+      B) {"symbol": "XAUUSD", "batches": [{"timeframe": "M1", "candles": [...]}, ...]}   (aussi: items, series)
+      C) [{"symbol": "XAUUSD", "timeframe": "M1", "candles": [...]}, ...]
+    Retourne (symbole, [(timeframe, candles), ...]).
+    """
+    symbol = ""
+    items: List[Tuple[str, Any]] = []
+
+    def _norm_tf(tf: Any) -> str:
+        t = str(tf or "").strip().upper()
+        return _BATCH_TF_ALIASES.get(t, t) or "M1"
+
+    if isinstance(payload, list):
+        for it in payload:
+            if isinstance(it, dict):
+                symbol = symbol or str(it.get("symbol") or "")
+                items.append((_norm_tf(it.get("timeframe") or it.get("tf")), it.get("candles") or it.get("data") or []))
+        return symbol, items
+
+    if not isinstance(payload, dict):
+        return symbol, items
+
+    symbol = str(payload.get("symbol") or "")
+    for key in ("timeframes", "tfs", "candles_by_tf", "data"):
+        block = payload.get(key)
+        if isinstance(block, dict) and block:
+            for tf, cl in block.items():
+                if isinstance(cl, dict):
+                    cl = cl.get("candles") or []
+                items.append((_norm_tf(tf), cl))
+            return symbol, items
+    for key in ("batches", "items", "series", "timeframes", "data"):
+        block = payload.get(key)
+        if isinstance(block, list) and block:
+            for it in block:
+                if isinstance(it, dict):
+                    symbol = symbol or str(it.get("symbol") or "")
+                    items.append((_norm_tf(it.get("timeframe") or it.get("tf")), it.get("candles") or it.get("data") or []))
+            return symbol, items
+    # Dernier recours: cles M1/M5/... directement a la racine
+    for tf in ("M1", "M5", "M15", "M30", "H1", "H4", "D1", "W1"):
+        if isinstance(payload.get(tf), list):
+            items.append((tf, payload[tf]))
+    return symbol, items
+
+
+@app.post("/mt5/upload-candles/batch")
+@app.post("/mt5//upload-candles/batch")
+async def mt5_upload_candles_batch(http_request: Request):
+    """
+    Upload groupe M1/M5/M15/H1/H4/D1 en un seul POST (corrige le 404 de l'EA).
+    Chaque timeframe passe par mt5_upload_candles() : meme validation, meme cache, memes effets.
+    """
+    try:
+        try:
+            payload = await http_request.json()
+        except Exception:
+            payload = {}
+        symbol, items = _extract_batch_items(payload)
+        if not symbol or not items:
+            keys = list(payload.keys()) if isinstance(payload, dict) else type(payload).__name__
+            logger.warning(f"[MT5-BATCH] format non reconnu (cles racine={keys})")
+            return JSONResponse(
+                status_code=422,
+                content={"ok": False, "error": "unrecognized batch payload", "root_keys": str(keys)},
+            )
+
+        results: Dict[str, Any] = {}
+        ok_count = 0
+        for tf, candles in items:
+            if not candles:
+                results[tf] = {"ok": False, "error": "empty"}
+                continue
+            resp = await mt5_upload_candles(_BatchSubRequest({"symbol": symbol, "timeframe": tf, "candles": candles}))
+            if isinstance(resp, JSONResponse):  # erreur de validation/500 renvoyee par le handler
+                try:
+                    results[tf] = json.loads(resp.body)
+                except Exception:
+                    results[tf] = {"ok": False, "error": f"status {resp.status_code}"}
+            else:
+                results[tf] = resp
+            if results[tf].get("ok"):
+                ok_count += 1
+
+        logger.info(f"[MT5-BATCH] {symbol}: {ok_count}/{len(items)} timeframe(s) OK ({', '.join(results.keys())})")
+        return JSONResponse(
+            status_code=200 if ok_count else 422,
+            content=convert_numpy_to_python({
+                "ok": ok_count > 0,
+                "symbol": symbol,
+                "timeframes_ok": ok_count,
+                "timeframes_total": len(items),
+                "results": results,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }),
+        )
+    except Exception as e:
+        logger.error(f"[MT5-BATCH] erreur: {e}", exc_info=True)
+        return JSONResponse(status_code=500, content={"ok": False, "error": str(e)})
 
 
 @app.post("/ml/start")
@@ -12377,7 +12591,8 @@ async def force_retrain():
     if not ML_TRAINER_AVAILABLE:
         raise HTTPException(status_code=503, detail="Système ML non disponible")
     
-    # Forcer le réentraînement
+    # Forcer le réentraînement (vider le cache pour relire les modèles sur disque)
+    getattr(ml_trainer, "invalidate_model_cache", lambda: None)()
     models = ml_trainer.load_existing_models()
     retrained_count = 0
     
@@ -12392,7 +12607,8 @@ async def force_retrain():
             if new_metrics:
                 await ml_trainer.save_metrics_to_supabase(new_metrics)
                 retrained_count += 1
-    
+
+    getattr(ml_trainer, "invalidate_model_cache", lambda: None)()
     return {
         "status": "completed",
         "retrained_models": retrained_count,
@@ -12534,6 +12750,100 @@ async def _parse_mt5_json_body(request: Request) -> dict:
     except Exception:
         pass
     return body
+
+
+@app.get("/signals")
+async def get_chartist_signals(symbol: str = Query(..., description="Symbol (e.g. XAUUSD, UNIUSD)"), timeframe: str = Query("M1", description="Timeframe (M1, M5, M15, H1)")):
+    """
+    Retourne les patterns chartistes détectés pour un symbole/timeframe.
+    Utilisé par Nyao Scalper pour exécuter des ordres basés sur les figures chartistes.
+
+    Returns:
+        {
+            "symbol": "XAUUSD",
+            "timeframe": "M1",
+            "signals": [
+                {
+                    "pattern": "Epaule-tete-epaule",
+                    "direction": "SELL",
+                    "entry": 3875.50,
+                    "sl": 3885.00,
+                    "tp": 3860.00,
+                    "score": 0.85,
+                    "rr": 2.5,
+                    "confirmed": true,
+                    "reason": "cassure baissiere",
+                    "zone_low": 3870.00,
+                    "zone_high": 3880.00,
+                    "timestamp": "2026-11-12T17:15:07Z"
+                }
+            ],
+            "trend": {
+                "direction": "SELL",
+                "strength": 0.75,
+                "m1_aligned": true,
+                "m5_aligned": true,
+                "h1_aligned": false
+            }
+        }
+    """
+    try:
+        # Import chartist pattern detector
+        sys.path.insert(0, str(Path(__file__).resolve().parent / "python"))
+        from chartist_patterns import detect_all_patterns, compute_chartist_verdict
+
+        # Fetch candles from MT5
+        from mt5_candles_fetcher import fetch_mt5_candles
+        candles = fetch_mt5_candles(symbol, timeframe, bars=200)
+        if candles is None or candles.empty or len(candles) < 50:
+            return {"symbol": symbol, "timeframe": timeframe, "signals": [], "trend": None, "error": "Not enough candles"}
+
+        # Detect patterns
+        patterns = detect_all_patterns(symbol, candles)
+
+        # Convert to signal format
+        signals = []
+        for p in patterns:
+            if p.confirmed:  # Only confirmed patterns trigger orders
+                signals.append({
+                    "pattern": p.pattern,
+                    "direction": p.direction,
+                    "entry": p.entry,
+                    "sl": p.sl,
+                    "tp": p.tp,
+                    "score": p.score,
+                    "rr": p.rr,
+                    "confirmed": p.confirmed,
+                    "reason": p.reason,
+                    "zone_low": p.zone_low,
+                    "zone_high": p.zone_high,
+                    "timestamp": p.timestamp or datetime.now(timezone.utc).isoformat()
+                })
+
+        # Compute trend verdict
+        verdict = compute_chartist_verdict(patterns)
+        verdict_num = int(verdict.get("verdict_num", 0) or 0)
+        trend = {
+            "direction": "BUY" if verdict_num > 0 else "SELL" if verdict_num < 0 else "WAIT",
+            "strength": min(1.0, abs(verdict_num) / 3.0),
+            "m1_aligned": False,
+            "m5_aligned": False,
+            "h1_aligned": False
+        }
+
+        return {
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "signals": signals,
+            "trend": trend,
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+    except ImportError as e:
+        logger.warning(f"chartist_patterns module not available: {e}")
+        return {"symbol": symbol, "timeframe": timeframe, "signals": [], "trend": None, "error": "chartist_patterns not available"}
+    except Exception as e:
+        logger.error(f"Error fetching signals for {symbol}: {e}")
+        return {"symbol": symbol, "timeframe": timeframe, "signals": [], "trend": None, "error": str(e)}
 
 
 @app.post("/ml/pattern-forecast")
@@ -25959,13 +26269,214 @@ class TradingAgentsManualReportBody(BaseModel):
     entry_price: Optional[float] = None
     stop_loss: Optional[float] = None
     take_profit: Optional[float] = None
+    # Pipeline dispatch (Word + WhatsApp + /ea/commands)
+    dispatch: bool = Field(True, description="Si true: DOCX + WA + enqueue EA si BUY/SELL")
+    enqueue: bool = Field(True, description="Enqueue /ea/commands si BUY/SELL confiante")
+    order_kind: Optional[str] = Field(None, description="limit|market (défaut: depuis execution_type)")
+    ea: str = Field("Nyao", description="EA cible pour /ea/commands")
+
+
+class TradingAgentsDispatchItem(BaseModel):
+    symbol: str
+    recommendation: str
+    confidence: float = 0.5
+    reasoning: Optional[str] = None
+    execution_type: Optional[str] = None
+    entry_price: Optional[float] = None
+    stop_loss: Optional[float] = None
+    take_profit: Optional[float] = None
+    order_kind: Optional[str] = None
+    ea: str = "Nyao"
+
+
+class TradingAgentsDispatchBatchBody(BaseModel):
+    """Multi-symboles → 1 WhatsApp bloc + N DOCX + file d'ordres."""
+    items: List[TradingAgentsDispatchItem]
+    enqueue: bool = True
+    whatsapp: bool = True
+    docx: bool = True
+
+
+AI_TA_DISPATCH_MIN_CONF = float(os.getenv("AI_TA_DISPATCH_MIN_CONF", "0.55"))
+AI_TA_REPORTS_DIR = os.getenv(
+    "AI_TA_REPORTS_DIR",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "reports", "tradingagents"),
+)
+
+
+def _ta_reports_dir() -> str:
+    os.makedirs(AI_TA_REPORTS_DIR, exist_ok=True)
+    return AI_TA_REPORTS_DIR
+
+
+def _ta_write_docx_report(
+    symbol: str,
+    recommendation: str,
+    confidence: float,
+    reasoning: str,
+    entry_price: Optional[float] = None,
+    stop_loss: Optional[float] = None,
+    take_profit: Optional[float] = None,
+    extra_lines: Optional[List[str]] = None,
+) -> str:
+    """Écrit un rapport Word (.docx) et retourne le chemin absolu."""
+    from docx import Document  # type: ignore
+
+    doc = Document()
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M")
+    doc.add_heading(f"TradBOT — TradingAgents {symbol}", level=1)
+    doc.add_paragraph(f"Date: {ts}  |  Auteur: Sidouan Yeba")
+    doc.add_paragraph(f"Décision: {recommendation}  |  Confiance: {confidence:.0%}")
+    if entry_price:
+        doc.add_paragraph(f"Entrée: {entry_price}")
+    if stop_loss:
+        doc.add_paragraph(f"Stop-loss: {stop_loss}")
+    if take_profit:
+        doc.add_paragraph(f"Take-profit: {take_profit}")
+    doc.add_heading("Analyse", level=2)
+    for para in (reasoning or "—").split("\n"):
+        p = para.strip()
+        if p:
+            doc.add_paragraph(p)
+    if extra_lines:
+        doc.add_heading("Notes", level=2)
+        for ln in extra_lines:
+            if ln and str(ln).strip():
+                doc.add_paragraph(str(ln).strip())
+    doc.add_paragraph(
+        "Avertissement: rapport expérimental. L'EA MT5 applique le risque local "
+        "(lots, max loss, gates). Pas de garantie de profit."
+    )
+    safe = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in symbol)
+    fname = f"TA_{safe}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.docx"
+    path = os.path.join(_ta_reports_dir(), fname)
+    doc.save(path)
+    return path
+
+
+def _ta_order_kind_from_execution(execution_type: Optional[str], order_kind: Optional[str] = None) -> str:
+    if order_kind:
+        k = str(order_kind).strip().lower()
+        if k in ("limit", "market"):
+            return k
+    et = _normalize_ta_execution_type(execution_type)
+    if et in ("limit", "stop", "stop_limit"):
+        return "limit"
+    return "market"
+
+
+def _ta_dispatch_one(
+    *,
+    symbol: str,
+    recommendation: str,
+    confidence: float,
+    reasoning: str = "",
+    execution_type: Optional[str] = None,
+    entry_price: Optional[float] = None,
+    stop_loss: Optional[float] = None,
+    take_profit: Optional[float] = None,
+    order_kind: Optional[str] = None,
+    ea: str = "Nyao",
+    enqueue: bool = True,
+    make_docx: bool = True,
+    send_wa: bool = True,
+) -> Dict[str, Any]:
+    """
+    DOCX + WhatsApp + enqueue /ea/commands si BUY/SELL confiante.
+    N'exécute PAS l'ordre broker — l'EA poll /ea/commands.
+    """
+    sym = (symbol or "").strip().upper()
+    rec = (recommendation or "HOLD").strip().upper()
+    if rec in ("NEUTRAL", "WAIT"):
+        rec = "HOLD"
+    conf = float(confidence or 0.0)
+    if conf > 1.0:
+        conf = min(1.0, conf / 100.0)
+    conf = max(0.0, min(1.0, conf))
+    kind = _ta_order_kind_from_execution(execution_type, order_kind)
+    out: Dict[str, Any] = {
+        "symbol": sym,
+        "recommendation": rec,
+        "confidence": conf,
+        "order_kind": kind,
+        "docx_path": None,
+        "queued": None,
+        "whatsapp": False,
+    }
+    docx_path = None
+    if make_docx:
+        try:
+            docx_path = _ta_write_docx_report(
+                sym, rec, conf, reasoning or "",
+                entry_price=entry_price, stop_loss=stop_loss, take_profit=take_profit,
+            )
+            out["docx_path"] = docx_path
+        except Exception as e:
+            logger.warning("[TA-DISPATCH] docx fail %s: %s", sym, e)
+            out["docx_error"] = str(e)
+
+    queued = None
+    if (
+        enqueue
+        and rec in ("BUY", "SELL")
+        and conf >= AI_TA_DISPATCH_MIN_CONF
+    ):
+        try:
+            queued = _ea_cmd_enqueue(
+                {
+                    "ea": ea or "Nyao",
+                    "symbol": sym,
+                    "side": rec,
+                    "order_kind": kind,
+                    "entry": entry_price,
+                    "sl": stop_loss,
+                    "tp": take_profit,
+                    "confidence": conf,
+                    "reason": f"tradingagents:{rec} {(reasoning or '')[:180]}",
+                    "source": "tradingagents",
+                }
+            )
+            out["queued"] = queued
+        except Exception as e:
+            logger.warning("[TA-DISPATCH] enqueue fail %s: %s", sym, e)
+            out["enqueue_error"] = str(e)
+
+    if send_wa:
+        try:
+            ts = datetime.now(timezone.utc).strftime("%H:%M UTC")
+            lines = [
+                f"📄 TradingAgents [{ts}]",
+                f"📌 {sym} → {rec} (conf {conf:.0%})",
+                f"Type: {kind}",
+            ]
+            if entry_price:
+                lines.append(f"Entry ≈ {entry_price}")
+            if stop_loss:
+                lines.append(f"SL ≈ {stop_loss}")
+            if take_profit:
+                lines.append(f"TP ≈ {take_profit}")
+            if queued:
+                lines.append(f"✅ Commande EA [{queued.get('id')}] — risque local")
+            elif rec in ("BUY", "SELL") and conf < AI_TA_DISPATCH_MIN_CONF:
+                lines.append(f"⏸ Pas d'ordre (conf < {AI_TA_DISPATCH_MIN_CONF:.0%})")
+            else:
+                lines.append("⏸ HOLD / pas d'enqueue")
+            if docx_path:
+                lines.append(f"Word: {os.path.basename(docx_path)}")
+            snippet = (reasoning or "").replace("\n", " ").strip()[:280]
+            if snippet:
+                lines.append(snippet)
+            out["whatsapp"] = bool(_psychobot_send("\n".join(lines)))
+        except Exception as e:
+            logger.warning("[TA-DISPATCH] WA fail %s: %s", sym, e)
+    return out
 
 
 @app.post("/tradingagents/manual-report")
 async def tradingagents_manual_report(body: TradingAgentsManualReportBody):
     """
     Enregistre le rapport du CLI TradingAgents pour le symbole (MT5).
-    Les appels suivants à POST /decision pour ce symbole pondèrent buy/sell avec ce rapport (TTL configurable).
+    Optionnellement: DOCX + WhatsApp + file /ea/commands (dispatch=true).
     """
     sym = (body.symbol or "").strip().upper()
     if not sym:
@@ -26010,6 +26521,23 @@ async def tradingagents_manual_report(body: TradingAgentsManualReportBody):
         _risk.get("recommended_lot") or 0.0,
         _risk.get("max_loss_usd") or 0.0,
     )
+    dispatch_out = None
+    if body.dispatch:
+        dispatch_out = _ta_dispatch_one(
+            symbol=sym,
+            recommendation=rec_norm,
+            confidence=conf,
+            reasoning=body.reasoning or "",
+            execution_type=body.execution_type,
+            entry_price=body.entry_price,
+            stop_loss=body.stop_loss,
+            take_profit=body.take_profit,
+            order_kind=body.order_kind,
+            ea=body.ea or "Nyao",
+            enqueue=bool(body.enqueue),
+            make_docx=True,
+            send_wa=True,
+        )
     return {
         "ok": True,
         "symbol": sym,
@@ -26017,6 +26545,94 @@ async def tradingagents_manual_report(body: TradingAgentsManualReportBody):
         "risk_info": _risk,
         "recommended_lot": _risk.get("recommended_lot"),
         "max_loss_usd": _risk.get("max_loss_usd"),
+        "dispatch": dispatch_out,
+    }
+
+
+@app.post("/tradingagents/dispatch-batch")
+async def tradingagents_dispatch_batch(body: TradingAgentsDispatchBatchBody):
+    """
+    Multi-symboles TradingAgents → 1 WhatsApp groupé + DOCX par symbole + /ea/commands.
+    """
+    if not body.items:
+        raise HTTPException(400, "items vide")
+    results = []
+    queued_n = 0
+    for it in body.items[:32]:
+        # store in manual cache too
+        rec = (it.recommendation or "HOLD").strip().upper()
+        rec_norm = "HOLD" if rec in ("NEUTRAL", "WAIT") else rec
+        conf = float(it.confidence or 0.0)
+        if conf > 1.0:
+            conf = min(1.0, conf / 100.0)
+        conf = max(0.0, min(1.0, conf))
+        sym = (it.symbol or "").strip().upper()
+        if not sym:
+            continue
+        async with _tradingagents_manual_lock:
+            _tradingagents_manual_reports[sym] = {
+                "ts": time.time(),
+                "recommendation": rec_norm,
+                "confidence": conf,
+                "reasoning": (it.reasoning or "")[:12000],
+                "raw": None,
+                "execution_type": it.execution_type,
+                "entry_price": it.entry_price,
+                "stop_loss": it.stop_loss,
+                "take_profit": it.take_profit,
+            }
+        d = _ta_dispatch_one(
+            symbol=sym,
+            recommendation=rec_norm,
+            confidence=conf,
+            reasoning=it.reasoning or "",
+            execution_type=it.execution_type,
+            entry_price=it.entry_price,
+            stop_loss=it.stop_loss,
+            take_profit=it.take_profit,
+            order_kind=it.order_kind,
+            ea=it.ea or "Nyao",
+            enqueue=bool(body.enqueue),
+            make_docx=bool(body.docx),
+            send_wa=False,  # one batched WA below
+        )
+        if d.get("queued"):
+            queued_n += 1
+        results.append(d)
+
+    wa_ok = False
+    if body.whatsapp and results:
+        ts = datetime.now(timezone.utc).strftime("%H:%M UTC")
+        lines = [f"📄 TradingAgents BATCH [{ts}] — {len(results)} symbole(s)", ""]
+        for r in results:
+            icon = "🟢" if r["recommendation"] == "BUY" else ("🔴" if r["recommendation"] == "SELL" else "⚪")
+            q = r.get("queued") or {}
+            qid = q.get("id", "—") if q else "—"
+            lines.append(
+                f"{icon} {r['symbol']}: {r['recommendation']} {r['confidence']:.0%} "
+                f"{r.get('order_kind')} | cmd={qid}"
+            )
+            if r.get("docx_path"):
+                lines.append(f"   Word: {os.path.basename(r['docx_path'])}")
+        lines.append("")
+        lines.append(f"Ordres fileés: {queued_n} — exécution = EA sous risque local")
+        # reuse chunk helper if available
+        try:
+            msg = "\n".join(lines)
+            for block in _chunk_wa_lines(msg.split("\n")):
+                if _psychobot_send(block):
+                    wa_ok = True
+        except NameError:
+            wa_ok = bool(_psychobot_send("\n".join(lines)))
+
+    return {
+        "ok": True,
+        "count": len(results),
+        "queued_count": queued_n,
+        "whatsapp": wa_ok,
+        "results": results,
+        "author": "Sidouan Yeba",
+        "min_conf": AI_TA_DISPATCH_MIN_CONF,
     }
 
 
@@ -29528,7 +30144,8 @@ def _gom_market_dir_sign(record: dict) -> int:
 def _gom_apply_direction_conflict_veto(record: dict) -> None:
     """FIX-02 : si la prédiction et l'état global du marché s'opposent clairement
     (contradiction prédiction/sentiment), on met le verdict à WAIT et on abaisse
-    la cohérence — l'EA bloque alors toute entrée via son gate de cohérence."""
+    la cohérence — l'EA bloque alors toute entrée via son gate de cohérence.
+    v1.59: pour FX Vol, appliquer le veto SEULEMENT en correction active."""
     try:
         vn = int(record.get("verdict_num") or 0)
         if vn == 0:
@@ -29537,6 +30154,14 @@ def _gom_apply_direction_conflict_veto(record: dict) -> None:
         m_sign = _gom_market_dir_sign(record)
         if p_sign == 0 or m_sign == 0 or p_sign == m_sign:
             return
+        # v1.59: pour FX Vol et autres synthétiques, appliquer le veto SEULEMENT en correction active
+        sym = str(record.get("symbol") or record.get("_symbol") or "?").upper()
+        is_synth = any(x in sym for x in ["FXVOL", "SFXVOL", "SFVVOL", "BOOM", "CRASH", "PAINX", "GAINX", "FLIPX", "PLUSX"])
+        if is_synth:
+            # Bypass si PAS en correction active
+            in_corr = bool(record.get("pa_in_correction") or record.get("price_action_in_correction"))
+            if not in_corr:
+                return
         prev_vn = vn
         record["verdict_num"] = 0
         record["verdict"] = "WAIT"
@@ -30711,24 +31336,96 @@ async def resolve_pending_order(payload: dict = Body(...)):
 # ── Approval store (pipeline avec validation WhatsApp) ──────────────────────
 # key = symbol | value = {"answer": "yes"|"no"|None, "ts": float}
 _APPROVAL_STORE: Dict[str, dict] = {}
+# Propositions EA en attente d'OUI/NON WhatsApp (PsychoBot → /approval)
+# key = symbol upper | value = proposal dict
+_EA_PROPOSALS: Dict[str, dict] = {}
+_EA_PROPOSAL_TTL_SEC = int(os.getenv("EA_PROPOSAL_TTL_SEC", "900"))
+
+
+def _ea_proposal_purge(now: Optional[float] = None) -> None:
+    now = now or time.time()
+    dead = [
+        k for k, v in _EA_PROPOSALS.items()
+        if (now - float(v.get("ts", 0))) > _EA_PROPOSAL_TTL_SEC
+    ]
+    for k in dead:
+        _EA_PROPOSALS.pop(k, None)
+
+
+def _ea_proposal_apply_approval(sym: str, answer: str) -> Dict[str, Any]:
+    """Sur OUI: enqueue /ea/commands. Sur NON: drop. Risk reste côté EA."""
+    _ea_proposal_purge()
+    prop = _EA_PROPOSALS.get(sym)
+    if not prop:
+        # Essai clé non normalisée / partielle
+        for k, v in list(_EA_PROPOSALS.items()):
+            if k.upper() == sym.upper() or sym.upper() in k.upper() or k.upper() in sym.upper():
+                prop = v
+                sym = k
+                break
+    if not prop:
+        return {"ok": True, "symbol": sym, "answer": answer, "queued": None, "proposal": None}
+
+    if answer == "no":
+        _EA_PROPOSALS.pop(sym, None)
+        _freellm_wa_notify(
+            f"prop_no_{sym}",
+            f"REFUS WhatsApp — proposition annulée\n{sym} {prop.get('side')} ({prop.get('ea')})",
+        )
+        return {"ok": True, "symbol": sym, "answer": "no", "queued": None, "proposal": prop}
+
+    queued = _ea_cmd_enqueue(
+        {
+            "ea": prop.get("ea") or "SMC",
+            "symbol": prop.get("symbol") or sym,
+            "side": prop.get("side"),
+            "order_kind": prop.get("order_kind") or "limit",
+            "entry": prop.get("entry"),
+            "sl": prop.get("sl"),
+            "tp": prop.get("tp"),
+            "confidence": float(prop.get("confidence") or 0.0),
+            "reason": f"wa-approve:{prop.get('reason', '')}"[:400],
+            "source": "psychobot",
+        }
+    )
+    _EA_PROPOSALS.pop(sym, None)
+    _freellm_wa_notify(
+        f"prop_yes_{sym}",
+        f"OUI WhatsApp — commande EA [{queued['id']}]\n"
+        f"{queued['ea']} {queued['symbol']} {queued['side']} {queued['order_kind']}\n"
+        f"entry={queued.get('entry')} SL={queued.get('sl')} TP={queued.get('tp')}\n"
+        f"L'EA exécute sous risque local (poll /ea/commands).",
+    )
+    return {"ok": True, "symbol": sym, "answer": "yes", "queued": queued, "proposal": prop}
+
 
 @app.post("/approval")
 async def post_approval(payload: dict = Body(...)):
-    """Enregistre la réponse OUI/NON de l'utilisateur pour un symbole.
-    Appelé par PsychoBot quand l'utilisateur répond au message de validation.
+    """Enregistre OUI/NON WhatsApp et, s'il y a une proposition EA, enqueue /ea/commands.
     payload: {symbol: str, answer: "yes"|"no"}
     """
-    sym    = _resolve_symbol((payload.get("symbol") or "").strip().upper())
+    raw_sym = (payload.get("symbol") or "").strip()
+    sym    = _resolve_symbol(raw_sym.upper()) if raw_sym else ""
     answer = str(payload.get("answer") or "").strip().lower()
-    if answer in ("oui", "yes", "o", "y", "1", "ok", "go", "valider"):
+    if answer in ("oui", "yes", "o", "y", "1", "ok", "go", "valider", "valide"):
         answer = "yes"
-    elif answer in ("non", "no", "n", "0", "skip", "annuler"):
+    elif answer in ("non", "no", "n", "0", "skip", "annuler", "annule"):
         answer = "no"
     else:
         return {"ok": False, "message": f"Réponse non reconnue: {answer}. Utilisez yes/no"}
+
+    # Si pas de symbole: prendre la proposition la plus récente
+    if not sym:
+        _ea_proposal_purge()
+        if _EA_PROPOSALS:
+            sym = max(_EA_PROPOSALS.items(), key=lambda kv: float(kv[1].get("ts", 0)))[0]
+        else:
+            return {"ok": False, "message": "Aucun symbole et aucune proposition en attente"}
+
     _APPROVAL_STORE[sym] = {"answer": answer, "ts": time.time()}
     logger.info(f"[Approval] {sym} → {answer}")
-    return {"ok": True, "symbol": sym, "answer": answer}
+    result = _ea_proposal_apply_approval(sym, answer)
+    return result
 
 @app.get("/approval/{symbol}")
 async def get_approval(symbol: str):
@@ -31323,8 +32020,77 @@ def _build_verdicts_status_message() -> str:
     return "\n".join(lines).rstrip()
 
 
+def _chunk_wa_lines(lines: list, max_chars: int = 3500) -> list:
+    """Split long WA payloads into <=max_chars blocks (PsychoBot-friendly)."""
+    blocks, cur = [], []
+    size = 0
+    for ln in lines:
+        add = len(ln) + 1
+        if cur and size + add > max_chars:
+            blocks.append("\n".join(cur))
+            cur, size = [ln], add
+        else:
+            cur.append(ln)
+            size += add
+    if cur:
+        blocks.append("\n".join(cur))
+    return blocks
+
+
+def _build_batched_opportunity_message(opps: list) -> str:
+    """One WhatsApp block for many GOOD/PERFECT symbols (not 1 msg / symbol)."""
+    ts = datetime.now(timezone.utc).strftime("%H:%M UTC")
+    lines = [f"🎯 OPPORTUNITÉS GOM [{ts}] — {len(opps)} symbole(s)", ""]
+    # Group by broker
+    groups: dict = {}
+    for sym, v in opps:
+        br = _broker_label_for_symbol(sym)
+        groups.setdefault(br, []).append((sym, v))
+    for br, items in groups.items():
+        lines.append(f"—— {br} ——")
+        items.sort(key=lambda x: (-abs(int((x[1] or {}).get("verdict_num", 0) or 0)), str(x[0])))
+        for sym, v in items:
+            vn = int(v.get("verdict_num", 0) or 0)
+            verd = str(v.get("verdict") or "?").upper()
+            coh = float(v.get("coherence_pct", 0) or 0)
+            m5 = str(v.get("tf_m5_dir") or "?")[:4]
+            h1 = str(v.get("tf_h1_dir") or "?")[:4]
+            entry = float(v.get("entry") or v.get("price") or 0)
+            sl = float(v.get("sl") or 0)
+            tp = float(v.get("tp") or v.get("tp1") or 0)
+            icon = "🟢" if vn > 0 else "🔴"
+            direction = "BUY" if vn > 0 else "SELL"
+            row = f"{icon} {sym}: {verd} {direction} vn={vn:+d} coh={coh:.0f}% M5={m5} H1={h1}"
+            if entry > 0:
+                row += f" | e≈{entry:,.5g}"
+            if sl > 0:
+                row += f" sl≈{sl:,.5g}"
+            if tp > 0:
+                row += f" tp≈{tp:,.5g}"
+            lines.append(row)
+        lines.append("")
+    lines.append("👉 Ouvre les graphiques listés — risque local EA inchangé")
+    return "\n".join(lines).rstrip()
+
+
+def _build_batched_exit_message(exits: list) -> str:
+    """One WhatsApp block for GOOD/PERFECT → WAIT transitions."""
+    ts = datetime.now(timezone.utc).strftime("%H:%M UTC")
+    lines = [f"⚠️ SORTIES GOM [{ts}] — {len(exits)} symbole(s)", ""]
+    for sym, prev_vn, v in exits:
+        prev = "PERFECT" if abs(prev_vn) >= 3 else "GOOD"
+        side = "BUY" if prev_vn > 0 else "SELL"
+        coh = float((v or {}).get("coherence_pct", 0) or 0)
+        lines.append(
+            f"📌 {sym} ({_broker_label_for_symbol(sym)}): {prev} {side} (vn={prev_vn:+d}) → WAIT | coh={coh:.0f}%"
+        )
+    lines.append("")
+    lines.append("👉 Ferme ou sécurise (BE / partial)")
+    return "\n".join(lines)
+
+
 async def _scan_opportunities_whatsapp_loop():
-    """Scan temps réel: GOOD/PERFECT → alerte entrée; transition → WAIT → alerte sortie."""
+    """Scan temps réel: batch WhatsApp (bloc multi-symboles) au lieu d'1 message / symbole."""
     import asyncio as _asyncio
     await _asyncio.sleep(12)
     global _PREV_GOM_VN
@@ -31337,6 +32103,8 @@ async def _scan_opportunities_whatsapp_loop():
                     items = list(_GOM_VERDICT_STORE.items())
                 except Exception:
                     items = []
+                entry_batch = []  # (sym, v)
+                exit_batch = []   # (sym, prev_vn, v)
                 for sym, v in items:
                     try:
                         vn = int(v.get("verdict_num", 0) or 0)
@@ -31344,15 +32112,13 @@ async def _scan_opportunities_whatsapp_loop():
                         vn = 0
                     prev = _PREV_GOM_VN.get(sym)
 
-                    # Transition GOOD/PERFECT → WAIT (sortie)
+                    # Transition GOOD/PERFECT → WAIT (sortie) — collect then batch-send
                     if prev is not None and abs(prev) >= WA_OPP_ALERT_MIN_VN and vn == 0:
-                        msg = _build_exit_wait_message(sym, prev, v or {})
-                        if _psychobot_send(msg, phone):
-                            logger.info("[WA GOM] EXIT %s %s→WAIT", sym, prev)
+                        exit_batch.append((sym, prev, v or {}))
                         _PREV_GOM_VN[sym] = vn
                         continue
 
-                    # Opportunité GOOD/PERFECT
+                    # Opportunité GOOD/PERFECT — collect then batch-send
                     if abs(vn) >= WA_OPP_ALERT_MIN_VN:
                         ts_raw = v.get("timestamp")
                         age_sec = 0
@@ -31371,12 +32137,18 @@ async def _scan_opportunities_whatsapp_loop():
                         if last and last[0] == vn and (now_epoch - last[1] < WA_OPP_ALERT_COOLDOWN_SEC):
                             _PREV_GOM_VN[sym] = vn
                             continue
-                        # Aussi alerter si transition depuis WAIT/SIMPLE vers GOOD
-                        msg = _build_opportunity_message(sym, v or {})
-                        if _psychobot_send(msg, phone):
-                            _LAST_WA_OPP_ALERT[sym] = (vn, now_epoch)
-                            logger.info("[WA GOM] ENTRY opp %s %s", sym, v.get("verdict"))
+                        entry_batch.append((sym, v or {}))
+                        _LAST_WA_OPP_ALERT[sym] = (vn, now_epoch)
                     _PREV_GOM_VN[sym] = vn
+
+                if exit_batch:
+                    for block in _chunk_wa_lines(_build_batched_exit_message(exit_batch).split("\n")):
+                        if _psychobot_send(block, phone):
+                            logger.info("[WA GOM] EXIT batch %d symbole(s)", len(exit_batch))
+                if entry_batch:
+                    for block in _chunk_wa_lines(_build_batched_opportunity_message(entry_batch).split("\n")):
+                        if _psychobot_send(block, phone):
+                            logger.info("[WA GOM] ENTRY batch %d symbole(s)", len(entry_batch))
             await _asyncio.sleep(WA_OPP_SCAN_INTERVAL_SEC)
         except Exception as _loop_err:
             logger.error("[WA GOM] scan loop: %s", _loop_err)
@@ -33264,6 +34036,967 @@ async def chartist_scan_from_store(symbol: str = Query(...)):
     return result
 
 
+# ========== ENDPOINTS ANALYSE SHADOW ICT ==========
+@app.get("/shadow/analyze")
+async def shadow_analyze_endpoint():
+    """Lancer une analyse manuelle des données Shadow ICT"""
+    if not SHADOW_ANALYZER_AVAILABLE or not shadow_analyzer:
+        raise HTTPException(503, "Module d'analyse Shadow ICT non disponible")
+    
+    try:
+        results = shadow_analyzer.analyze()
+        return {"ok": True, "results": results}
+    except Exception as e:
+        logger.error(f"Erreur analyse shadow: {e}")
+        raise HTTPException(500, f"Erreur analyse: {e}")
+
+
+@app.get("/shadow/status")
+async def shadow_status():
+    """Statut du module d'analyse Shadow ICT"""
+    return {
+        "ok": True,
+        "available": SHADOW_ANALYZER_AVAILABLE,
+        "last_analysis": shadow_analyzer.last_analysis_time.isoformat() if shadow_analyzer and shadow_analyzer.last_analysis_time else None,
+        "csv_path": shadow_analyzer.csv_path if shadow_analyzer else None,
+        "csv_exists": os.path.exists(shadow_analyzer.csv_path) if shadow_analyzer else False
+    }
+
+
+@app.get("/shadow/whatsapp")
+async def shadow_whatsapp_format():
+    """Récupérer le format WhatsApp des derniers résultats"""
+    if not SHADOW_ANALYZER_AVAILABLE or not shadow_analyzer:
+        raise HTTPException(503, "Module d'analyse Shadow ICT non disponible")
+    
+    if not shadow_analyzer.last_results:
+        # Lancer une analyse si pas de résultats
+        results = shadow_analyzer.analyze()
+    else:
+        results = shadow_analyzer.last_results
+    
+    whatsapp_msg = shadow_analyzer.format_for_whatsapp(results)
+    return {"ok": True, "whatsapp_message": whatsapp_msg}
+
+
+@app.get("/shadow/ea")
+async def shadow_ea_format():
+    """Récupérer le format EA des derniers résultats"""
+    if not SHADOW_ANALYZER_AVAILABLE or not shadow_analyzer:
+        raise HTTPException(503, "Module d'analyse Shadow ICT non disponible")
+    
+    if not shadow_analyzer.last_results:
+        # Lancer une analyse si pas de résultats
+        results = shadow_analyzer.analyze()
+    else:
+        results = shadow_analyzer.last_results
+    
+    ea_data = shadow_analyzer.format_for_ea(results)
+    return {"ok": True, "ea_data": ea_data}
+
+
+# ========== ENDPOINT MOTEUR DE DÉCISION UNIFIÉ ==========
+class UnifiedDecisionRequest(BaseModel):
+    """Request pour le moteur de décision unifié"""
+    symbol: str
+    candles: List[Dict]  # OHLCV candles
+    ob_zone: Optional[Dict] = None  # Order Block zone {top, bottom, index}
+    liquidity_zones: Optional[List[Dict]] = None  # Liquidity zones
+    fib_zone: Optional[Tuple[float, float]] = None  # Fibonacci zone (61.8%, 78.6%)
+    direction: str = "auto"  # "bullish", "bearish", "auto"
+
+
+@app.post("/unified/decision")
+async def unified_decision_endpoint(request: UnifiedDecisionRequest):
+    """Endpoint pour le moteur de décision unifié (Profittown + ICT + Shadow)"""
+    if not UNIFIED_DECISION_AVAILABLE or not unified_engine:
+        raise HTTPException(503, "Moteur de décision unifié non disponible")
+    
+    try:
+        # Injecter shadow analyzer si disponible
+        if SHADOW_ANALYZER_AVAILABLE and shadow_analyzer:
+            unified_engine.set_shadow_analyzer(shadow_analyzer)
+        
+        # Prendre la décision
+        decision = unified_engine.make_decision(
+            candles=request.candles,
+            ob_zone=request.ob_zone,
+            liquidity_zones=request.liquidity_zones,
+            fib_zone=request.fib_zone,
+            direction=request.direction
+        )
+        
+        return {
+            "ok": True,
+            "decision": {
+                "action": decision.action,
+                "confidence": decision.confidence,
+                "primary_source": decision.primary_source,
+                "profittown_score": decision.profittown_score,
+                "ict_status": decision.ict_status.value if decision.ict_status else None,
+                "shadow_confidence": decision.shadow_confidence,
+                "reasons": decision.reasons,
+                "warnings": decision.warnings,
+                "entry_price": decision.entry_price,
+                "sl_price": decision.sl_price,
+                "tp_price": decision.tp_price,
+                "rr_ratio": decision.rr_ratio
+            }
+        }
+    except Exception as e:
+        logger.error(f"Erreur décision unifiée: {e}")
+        raise HTTPException(500, f"Erreur décision: {e}")
+
+
+# ========== FreeLLM second-look (optional judge) — Author: Sidouan Yeba ==========
+class SecondLookRequest(BaseModel):
+    """Résumé situation EA → FreeLLM keep/reject/adjust. Pas de sizing risque ici."""
+    ea: str = "Nyao"
+    symbol: str
+    side: str  # BUY|SELL
+    order_kind: str = "limit"  # limit|market
+    confidence: float = 0.0  # 0..1
+    confluence: float = 0.0
+    score: float = 0.0
+    entry: Optional[float] = None
+    sl: Optional[float] = None
+    tp: Optional[float] = None
+    conf_tags: str = ""
+    regime: str = ""
+    summary: str = ""
+    force: bool = False  # bypass high-conf gate (tests)
+
+
+def _freellm_config() -> dict:
+    enabled = str(os.getenv("FREELLM_ENABLED", "true")).strip().lower() in ("1", "true", "yes", "on")
+    # FreeLLM chat cold-path ~1.5–4s; default was 1200ms → systematic timeout rejects.
+    return {
+        "enabled": enabled,
+        "base_url": os.getenv("FREELLM_BASE_URL", "http://127.0.0.1:31415/v1").rstrip("/"),
+        "api_key": os.getenv("FREELLM_API_KEY", ""),
+        "model": os.getenv("FREELLM_MODEL", "auto"),
+        "timeout_ms": int(os.getenv("FREELLM_TIMEOUT_MS", "15000")),
+        "min_confidence": float(os.getenv("FREELLM_MIN_CONFIDENCE", "0.70")),
+        # Streaming SSE hung to full timeout on FreeLLM local; non-stream ~1.5–4s OK.
+        "use_stream": str(os.getenv("FREELLM_USE_STREAM", "false")).strip().lower() in ("1", "true", "yes", "on"),
+        "max_tokens": int(os.getenv("FREELLM_MAX_TOKENS", "180")),
+        "wa_notify": str(os.getenv("FREELLM_WA_NOTIFY", "true")).strip().lower() in ("1", "true", "yes", "on"),
+    }
+
+
+_LAST_FREELLM_WA: dict = {}  # key -> epoch
+FREELLM_WA_COOLDOWN_SEC = int(os.getenv("FREELLM_WA_COOLDOWN_SEC", "120"))
+
+
+def _freellm_wa_notify(kind: str, message: str) -> None:
+    """Best-effort WhatsApp via PsychoBot for FreeLLM / second-look / health events."""
+    try:
+        cfg = _freellm_config()
+        if not cfg.get("wa_notify", True):
+            logger.info("[FREELLM-WA] skipped kind=%s (wa_notify=false)", kind)
+            return
+        now = time.time()
+        last = _LAST_FREELLM_WA.get(kind, 0.0)
+        if now - last < FREELLM_WA_COOLDOWN_SEC and kind not in ("test",):
+            logger.info(
+                "[FREELLM-WA] cooldown skip kind=%s (%.0fs left)",
+                kind,
+                FREELLM_WA_COOLDOWN_SEC - (now - last),
+            )
+            return
+        logger.info("[FREELLM-WA] sending kind=%s …", kind)
+        ok = _psychobot_send(f"[TradBOT FreeLLM/{kind}]\n{message}")
+        if ok:
+            _LAST_FREELLM_WA[kind] = now
+            logger.info("[FREELLM-WA] sent kind=%s", kind)
+        else:
+            logger.warning("[FREELLM-WA] send failed kind=%s (check WHATSAPP_PHONE / PSYCHOBOT_URL)", kind)
+    except Exception as e:
+        logger.warning("[FREELLM-WA] notify error: %s", e)
+
+
+def _parse_second_look_text(text: str, entry: Optional[float], sl: Optional[float], tp: Optional[float]) -> dict:
+    """Normalize FreeLLM free text / JSON into keep|reject|adjust.
+
+    Do NOT keyword-match bare 'reject' inside schema prose like keep|reject|adjust.
+    """
+    action = "keep"
+    reason = (text or "").strip()[:400]
+    adj_entry, adj_sl, adj_tp = entry, sl, tp
+    raw = text or ""
+    # Try JSON blob first (prefer last balanced object if model rambles)
+    try:
+        start = raw.find("{")
+        end = raw.rfind("}")
+        if start >= 0 and end > start:
+            obj = json.loads(raw[start : end + 1])
+            if isinstance(obj, dict) and "action" in obj:
+                a = str(obj.get("action", "keep")).strip().lower()
+                if a in ("keep", "reject", "adjust", "cancel"):
+                    action = "reject" if a == "cancel" else a
+                reason = str(obj.get("reason", reason))[:400]
+                if obj.get("entry") is not None:
+                    adj_entry = float(obj["entry"])
+                if obj.get("sl") is not None:
+                    adj_sl = float(obj["sl"])
+                if obj.get("tp") is not None:
+                    adj_tp = float(obj["tp"])
+                return {
+                    "action": action,
+                    "entry": adj_entry,
+                    "sl": adj_sl,
+                    "tp": adj_tp,
+                    "reason": reason,
+                }
+    except Exception:
+        pass
+    # Explicit action patterns only (avoid schema enum false positives)
+    low = raw.lower()
+    import re as _re
+    m = _re.search(r'"action"\s*:\s*"(keep|reject|adjust|cancel)"', low)
+    if m:
+        action = "reject" if m.group(1) == "cancel" else m.group(1)
+    elif _re.search(r"\b(reject(?:ed|ing)?|annul(?:er|e)|no[\s_-]?trade|bloqu(?:e|é))\b", low) and \
+            "keep|reject|adjust" not in low.replace(" ", ""):
+        action = "reject"
+    elif _re.search(r"\b(adjust(?:ed|ing)?|ajust(?:e|er)|move entry)\b", low):
+        action = "adjust"
+    else:
+        action = "keep"
+        if not reason or "keep|reject|adjust" in low.replace(" ", ""):
+            reason = "freellm_unparsed_default_keep"
+    return {
+        "action": action,
+        "entry": adj_entry,
+        "sl": adj_sl,
+        "tp": adj_tp,
+        "reason": reason or "freellm_no_detail",
+    }
+
+
+@app.post("/ml/second-look")
+async def ml_second_look(request: SecondLookRequest):
+    """
+    Juge FreeLLM optionnel (haute conf ou LIMIT uniquement).
+    Timeout → action=reject (EA doit annuler le pending plutôt qu'attendre).
+    Ne modifie pas le risk engine local.
+    """
+    cfg = _freellm_config()
+    side = (request.side or "").upper().strip()
+    kind = (request.order_kind or "limit").lower().strip()
+    conf = float(request.confidence or 0.0)
+    if conf > 1.0:
+        conf = conf / 100.0
+
+    # Gate: only high-confidence or LIMIT (unless force)
+    eligible = bool(request.force) or kind == "limit" or conf >= cfg["min_confidence"]
+    if not eligible:
+        return {
+            "ok": True,
+            "skipped": True,
+            "action": "keep",
+            "reason": "freellm_skipped_low_conf_market",
+            "latency_ms": 0,
+            "provider": "none",
+        }
+
+    if not cfg["enabled"]:
+        return {
+            "ok": True,
+            "skipped": True,
+            "action": "keep",
+            "reason": "freellm_disabled",
+            "latency_ms": 0,
+            "provider": "none",
+        }
+
+    api_key = cfg["api_key"]
+    if not api_key:
+        # Fail-closed for LIMIT (cancel), soft keep for market when misconfigured
+        action = "reject" if kind == "limit" else "keep"
+        _freellm_wa_notify("config", "FREELLM_API_KEY missing — second-look cannot call FreeLLM")
+        return {
+            "ok": True,
+            "skipped": True,
+            "action": action,
+            "reason": "freellm_api_key_missing",
+            "latency_ms": 0,
+            "provider": "none",
+        }
+
+    prompt = (
+        "You are a trading second-look judge. Reply with ONE JSON object only, no prose. "
+        'Example: {"action":"keep","entry":null,"sl":null,"tp":null,"reason":"setup ok"}. '
+        "action must be exactly one of: keep, reject, adjust. "
+        "Never change max risk; only keep, reject, or adjust entry.\n"
+        f"EA={request.ea} symbol={request.symbol} side={side} kind={kind} "
+        f"confidence={conf:.3f} confluence={request.confluence:.3f} score={request.score:.3f} "
+        f"entry={request.entry} sl={request.sl} tp={request.tp} "
+        f"tags={request.conf_tags} regime={request.regime}\n"
+        f"summary={request.summary[:800]}"
+    )
+
+    timeout_s = max(3.0, cfg["timeout_ms"] / 1000.0)
+    url = f"{cfg['base_url']}/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    use_stream = bool(cfg.get("use_stream", True))
+    payload = {
+        "model": cfg["model"],
+        "temperature": 0.2,
+        "max_tokens": int(cfg.get("max_tokens", 180)),
+        "stream": use_stream,
+        "messages": [
+            {"role": "system", "content": "Trading second-look judge. JSON only. Be brief."},
+            {"role": "user", "content": prompt},
+        ],
+    }
+
+    t0 = time.time()
+    model_used = cfg["model"]
+    try:
+        import httpx
+        text = ""
+        async with httpx.AsyncClient(timeout=httpx.Timeout(timeout_s, connect=5.0)) as client:
+            if use_stream:
+                async with client.stream("POST", url, headers=headers, json=payload) as resp:
+                    latency_headers = int((time.time() - t0) * 1000)
+                    if resp.status_code >= 400:
+                        body = (await resp.aread()).decode("utf-8", errors="replace")[:200]
+                        logger.warning("[FREELLM] HTTP %s: %s", resp.status_code, body)
+                        _freellm_wa_notify(
+                            f"http_{resp.status_code}",
+                            f"HTTP {resp.status_code} on second-look {request.symbol} {side}\n{body}",
+                        )
+                        return {
+                            "ok": True,
+                            "action": "reject" if kind == "limit" else "keep",
+                            "reason": f"freellm_http_{resp.status_code}",
+                            "latency_ms": latency_headers,
+                            "provider": "freellm",
+                            "entry": request.entry,
+                            "sl": request.sl,
+                            "tp": request.tp,
+                        }
+                    async for line in resp.aiter_lines():
+                        if not line:
+                            continue
+                        if line.startswith("data: "):
+                            data_s = line[6:].strip()
+                        else:
+                            data_s = line.strip()
+                        if data_s == "[DONE]":
+                            break
+                        try:
+                            chunk = json.loads(data_s)
+                        except Exception:
+                            continue
+                        if chunk.get("model"):
+                            model_used = chunk.get("model") or model_used
+                        try:
+                            delta = chunk["choices"][0].get("delta") or {}
+                            piece = delta.get("content") or ""
+                            if not piece:
+                                # some providers put full message in non-stream shape mid-stream
+                                piece = (chunk["choices"][0].get("message") or {}).get("content") or ""
+                            text += piece
+                        except Exception:
+                            continue
+            else:
+                resp = await client.post(url, headers=headers, json={**payload, "stream": False})
+                if resp.status_code >= 400:
+                    logger.warning("[FREELLM] HTTP %s: %s", resp.status_code, resp.text[:200])
+                    _freellm_wa_notify(
+                        f"http_{resp.status_code}",
+                        f"HTTP {resp.status_code} on second-look {request.symbol} {side}\n{resp.text[:160]}",
+                    )
+                    return {
+                        "ok": True,
+                        "action": "reject" if kind == "limit" else "keep",
+                        "reason": f"freellm_http_{resp.status_code}",
+                        "latency_ms": int((time.time() - t0) * 1000),
+                        "provider": "freellm",
+                        "entry": request.entry,
+                        "sl": request.sl,
+                        "tp": request.tp,
+                    }
+                data = resp.json()
+                model_used = data.get("model", model_used)
+                try:
+                    text = data["choices"][0]["message"]["content"]
+                except Exception:
+                    text = str(data)[:500]
+
+        latency_ms = int((time.time() - t0) * 1000)
+        parsed = _parse_second_look_text(text, request.entry, request.sl, request.tp)
+        if parsed["action"] == "reject":
+            _freellm_wa_notify(
+                "reject",
+                f"{request.ea} {request.symbol} {side} LIMIT rejected by FreeLLM\n{parsed['reason'][:200]}",
+            )
+        else:
+            _freellm_wa_notify(
+                "decision",
+                f"{request.ea} {request.symbol} {side} → {parsed['action']} ({latency_ms}ms)\n{parsed['reason'][:200]}",
+            )
+        return {
+            "ok": True,
+            "skipped": False,
+            "action": parsed["action"],
+            "entry": parsed["entry"],
+            "sl": parsed["sl"],
+            "tp": parsed["tp"],
+            "reason": parsed["reason"],
+            "latency_ms": latency_ms,
+            "provider": "freellm",
+            "model": model_used,
+            "streamed": use_stream,
+        }
+    except Exception as e:
+        latency_ms = int((time.time() - t0) * 1000)
+        is_timeout = "Timeout" in type(e).__name__ or "timeout" in str(e).lower()
+        if is_timeout:
+            logger.warning("[FREELLM] timeout after %sms — reject LIMIT", latency_ms)
+            _freellm_wa_notify(
+                "timeout",
+                f"FreeLLM timeout {latency_ms}ms — cancel LIMIT {request.symbol} {side}",
+            )
+            return {
+                "ok": True,
+                "action": "reject",
+                "reason": "freellm_timeout_cancel_order",
+                "latency_ms": latency_ms,
+                "provider": "freellm",
+                "entry": request.entry,
+                "sl": request.sl,
+                "tp": request.tp,
+            }
+        logger.warning("[FREELLM] error: %s", e)
+        _freellm_wa_notify("error", f"FreeLLM error {type(e).__name__}: {e}")
+        return {
+            "ok": True,
+            "action": "reject" if kind == "limit" else "keep",
+            "reason": f"freellm_error:{type(e).__name__}",
+            "latency_ms": latency_ms,
+            "provider": "freellm",
+            "entry": request.entry,
+            "sl": request.sl,
+            "tp": request.tp,
+        }
+
+
+@app.get("/ml/second-look/health")
+async def ml_second_look_health(ping: bool = False, notify: bool = False):
+    """Health of FreeLLM second-look. Optional ?ping=1 probes /models; ?notify=1 alerts WA on failure."""
+    cfg = _freellm_config()
+    out = {
+        "ok": True,
+        "enabled": cfg["enabled"],
+        "base_url": cfg["base_url"],
+        "has_api_key": bool(cfg["api_key"]),
+        "timeout_ms": cfg["timeout_ms"],
+        "min_confidence": cfg["min_confidence"],
+        "model": cfg["model"],
+        "use_stream": cfg.get("use_stream", True),
+        "wa_notify": cfg.get("wa_notify", True),
+        "upstream_ok": None,
+        "upstream_ms": None,
+        "author": "Sidouan Yeba",
+    }
+    if ping and cfg["api_key"]:
+        t0 = time.time()
+        try:
+            import httpx
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                r = await client.get(
+                    f"{cfg['base_url']}/models",
+                    headers={"Authorization": f"Bearer {cfg['api_key']}"},
+                )
+            out["upstream_ms"] = int((time.time() - t0) * 1000)
+            out["upstream_ok"] = r.status_code == 200
+            if r.status_code != 200:
+                out["ok"] = False
+                if notify:
+                    _freellm_wa_notify("health", f"FreeLLM /models HTTP {r.status_code}")
+        except Exception as e:
+            out["upstream_ms"] = int((time.time() - t0) * 1000)
+            out["upstream_ok"] = False
+            out["ok"] = False
+            out["upstream_error"] = type(e).__name__
+            if notify:
+                _freellm_wa_notify("health", f"FreeLLM unreachable: {type(e).__name__}: {e}")
+    elif ping and not cfg["api_key"]:
+        out["ok"] = False
+        out["upstream_ok"] = False
+        if notify:
+            _freellm_wa_notify("health", "FreeLLM health ping skipped — API key missing")
+    return out
+
+
+@app.post("/ml/second-look/wa-test")
+async def ml_second_look_wa_test():
+    """Send a one-shot WhatsApp test via PsychoBot (no secrets in response)."""
+    logger.info("[FREELLM-WA] wa-test requested")
+    ok = _psychobot_send("[TradBOT] WhatsApp test — FreeLLM/PsychoBot channel OK (Sidouan Yeba)")
+    if ok:
+        _LAST_FREELLM_WA["test"] = time.time()
+        logger.info("[FREELLM-WA] sent kind=test")
+    else:
+        logger.warning("[FREELLM-WA] send failed kind=test")
+    return {"ok": ok, "channel": "psychobot", "has_phone": bool(WHATSAPP_PHONE)}
+
+
+# ========== EA command queue (server → EA execution) — Author: Sidouan Yeba ==========
+# Server analyzes (FreeLLM) + WhatsApp; EA polls and executes under LOCAL risk only.
+import uuid
+
+_EA_CMD_LOCK = threading.Lock()
+_EA_COMMANDS: deque = deque(maxlen=200)  # newest appended
+_EA_CMD_BY_ID: dict = {}
+EA_CMD_TTL_SEC = int(os.getenv("EA_CMD_TTL_SEC", "300"))
+EA_CMD_AUTO_ENQUEUE = str(os.getenv("EA_CMD_AUTO_ENQUEUE", "true")).strip().lower() in (
+    "1", "true", "yes", "on"
+)
+
+
+class EaCommandCreate(BaseModel):
+    ea: str = "Nyao"  # Nyao | SMC | any
+    symbol: str
+    side: str  # BUY|SELL
+    order_kind: str = "limit"  # limit|market
+    entry: Optional[float] = None
+    sl: Optional[float] = None
+    tp: Optional[float] = None
+    confidence: float = 0.0
+    reason: str = ""
+    source: str = "manual"  # manual|freellm|gom
+    force: bool = False
+
+
+class EaAnalyzeOpportunity(BaseModel):
+    """FreeLLM analyze → WhatsApp → optional enqueue for EA."""
+    ea: str = "Nyao"
+    symbol: str
+    side: str
+    order_kind: str = "limit"
+    confidence: float = 0.75
+    confluence: float = 0.0
+    score: float = 0.0
+    entry: Optional[float] = None
+    sl: Optional[float] = None
+    tp: Optional[float] = None
+    conf_tags: str = ""
+    regime: str = ""
+    summary: str = ""
+    enqueue_on_keep: bool = True
+
+
+class EaCommandAck(BaseModel):
+    status: str  # executed|rejected|ignored|expired
+    reason: str = ""
+    ticket: Optional[int] = None
+
+
+def _ea_cmd_purge_locked(now: Optional[float] = None) -> None:
+    now = now or time.time()
+    keep = deque(maxlen=200)
+    for c in _EA_COMMANDS:
+        if c.get("status") == "pending" and (now - float(c.get("ts", 0))) > EA_CMD_TTL_SEC:
+            c["status"] = "expired"
+            c["ack_reason"] = "ttl"
+        if c.get("status") in ("pending",) or (now - float(c.get("ts", 0))) < EA_CMD_TTL_SEC * 3:
+            keep.append(c)
+        else:
+            _EA_CMD_BY_ID.pop(c.get("id", ""), None)
+    _EA_COMMANDS.clear()
+    _EA_COMMANDS.extend(keep)
+
+
+def _ea_cmd_enqueue(payload: dict) -> dict:
+    now = time.time()
+    with _EA_CMD_LOCK:
+        _ea_cmd_purge_locked(now)
+        cmd = {
+            "id": str(uuid.uuid4())[:12],
+            "ts": now,
+            "status": "pending",
+            "ea": (payload.get("ea") or "Nyao"),
+            "symbol": payload.get("symbol") or "",
+            "side": (payload.get("side") or "").upper(),
+            "order_kind": (payload.get("order_kind") or "limit").lower(),
+            "entry": payload.get("entry"),
+            "sl": payload.get("sl"),
+            "tp": payload.get("tp"),
+            "confidence": float(payload.get("confidence") or 0.0),
+            "reason": payload.get("reason") or "",
+            "source": payload.get("source") or "manual",
+        }
+        _EA_COMMANDS.append(cmd)
+        _EA_CMD_BY_ID[cmd["id"]] = cmd
+        return dict(cmd)
+
+
+@app.post("/ea/commands")
+async def ea_commands_create(req: EaCommandCreate):
+    """Enqueue a trade command for an EA (risk still enforced by EA)."""
+    side = (req.side or "").upper().strip()
+    if side not in ("BUY", "SELL"):
+        raise HTTPException(400, "side must be BUY or SELL")
+    kind = (req.order_kind or "limit").lower().strip()
+    if kind not in ("limit", "market"):
+        raise HTTPException(400, "order_kind must be limit or market")
+    if not req.symbol:
+        raise HTTPException(400, "symbol required")
+    cmd = _ea_cmd_enqueue(req.model_dump())
+    _freellm_wa_notify(
+        f"cmd_{cmd['symbol']}_{cmd['side']}",
+        f"EA CMD queued [{cmd['id']}]\n{cmd['ea']} {cmd['symbol']} {cmd['side']} {cmd['order_kind']}\n"
+        f"entry={cmd['entry']} sl={cmd['sl']} tp={cmd['tp']}\n{cmd['reason'][:200]}",
+    )
+    return {"ok": True, "command": cmd}
+
+
+@app.get("/ea/commands")
+async def ea_commands_poll(
+    ea: str = Query("Nyao"),
+    symbol: Optional[str] = Query(None),
+    limit: int = Query(3, ge=1, le=20),
+):
+    """EA polls pending commands (optionally filtered by symbol)."""
+    now = time.time()
+    with _EA_CMD_LOCK:
+        _ea_cmd_purge_locked(now)
+        out = []
+        for c in list(_EA_COMMANDS):
+            if c.get("status") != "pending":
+                continue
+            if ea and str(c.get("ea", "")).lower() != str(ea).lower() and str(c.get("ea", "")).lower() != "any":
+                continue
+            if symbol and str(c.get("symbol", "")).upper() != str(symbol).upper():
+                continue
+            out.append(dict(c))
+            if len(out) >= limit:
+                break
+    return {"ok": True, "commands": out, "count": len(out), "ttl_sec": EA_CMD_TTL_SEC}
+
+
+@app.post("/ea/commands/{cmd_id}/ack")
+async def ea_commands_ack(cmd_id: str, req: EaCommandAck):
+    """EA acknowledges execution / rejection (local risk may reject)."""
+    st = (req.status or "").lower().strip()
+    if st not in ("executed", "rejected", "ignored", "expired"):
+        raise HTTPException(400, "invalid status")
+    with _EA_CMD_LOCK:
+        cmd = _EA_CMD_BY_ID.get(cmd_id)
+        if not cmd:
+            raise HTTPException(404, "command not found")
+        cmd["status"] = st
+        cmd["ack_reason"] = req.reason or ""
+        cmd["ticket"] = req.ticket
+        cmd["acked_ts"] = time.time()
+        snap = dict(cmd)
+    _freellm_wa_notify(
+        f"ack_{cmd_id}",
+        f"EA CMD {st.upper()} [{cmd_id}]\n{snap.get('ea')} {snap.get('symbol')} {snap.get('side')}\n"
+        f"{req.reason or ''}\nticket={req.ticket}",
+    )
+    return {"ok": True, "command": snap}
+
+
+class EaProposeTrade(BaseModel):
+    """PsychoBot → analyse → WhatsApp → attend OUI/NON avant /ea/commands."""
+    symbol: str
+    ea: str = "SMC"  # SMC | Nyao | any
+    side: Optional[str] = None  # BUY|SELL|None=auto GOM/FreeLLM
+    order_kind: str = "limit"
+    require_approval: bool = True
+
+
+def _ea_guess_levels(symbol: str, side: str) -> Dict[str, Any]:
+    """Niveaux initiaux depuis tick/GOM/bougies (l'EA recalcule le risque)."""
+    sym = _resolve_symbol((symbol or "").strip().upper())
+    px = float(_last_tick_price.get(sym) or 0.0)
+    atr = 0.0
+    try:
+        cache = _mt5_candles_cache.get(sym) or {}
+        df = cache.get("M5") or cache.get("M1")
+        if df is not None and len(df) >= 20:
+            if px <= 0 and "close" in df.columns:
+                px = float(df["close"].iloc[-1])
+            hi = df["high"].astype(float) if "high" in df.columns else None
+            lo = df["low"].astype(float) if "low" in df.columns else None
+            cl = df["close"].astype(float) if "close" in df.columns else None
+            if hi is not None and lo is not None and cl is not None and len(cl) >= 15:
+                prev = cl.shift(1)
+                tr = pd.concat([(hi - lo), (hi - prev).abs(), (lo - prev).abs()], axis=1).max(axis=1)
+                atr = float(tr.tail(14).mean())
+    except Exception:
+        pass
+    if px <= 0:
+        pending = _PENDING_ORDER_STORE.get(sym) or {}
+        px = float(pending.get("entry_price") or pending.get("entry") or 0.0)
+    if atr <= 0 and px > 0:
+        atr = px * 0.0015
+    side_u = (side or "BUY").upper()
+    entry = px
+    if side_u == "BUY":
+        sl = px - 1.2 * atr if atr > 0 else None
+        tp = px + 2.4 * atr if atr > 0 else None
+    else:
+        sl = px + 1.2 * atr if atr > 0 else None
+        tp = px - 2.4 * atr if atr > 0 else None
+    return {"symbol": sym, "entry": entry or None, "sl": sl, "tp": tp, "atr": atr, "price": px}
+
+
+@app.post("/ea/propose-trade")
+async def ea_propose_trade(req: EaProposeTrade):
+    """
+    Flux PsychoBot:
+      1) GOM + niveaux locaux
+      2) FreeLLM second-look (trading judge)
+      3) WhatsApp rapport + demande OUI/NON
+      4) Ordre EA seulement après POST /approval yes
+    """
+    sym = _resolve_symbol((req.symbol or "").strip().upper())
+    if not sym:
+        raise HTTPException(400, "symbol required")
+    ea = (req.ea or "SMC").strip()
+    if ea.upper() in ("SMC", "SMC_UNIVERSAL", "UNIVERSAL"):
+        ea = "SMC"
+    elif ea.upper() in ("NYAO", "NYAO_SCALPER", "SCALPER"):
+        ea = "Nyao"
+
+    gom = _gom_verdict_store_payload(sym, "M1", float(os.getenv("GOM_PROPOSE_MAX_AGE_SEC", "600"))) or {}
+    vn = int(gom.get("verdict_num") or 0)
+    verdict = str(gom.get("verdict") or "WAIT")
+    side = (req.side or "").upper().strip()
+    if side not in ("BUY", "SELL"):
+        if vn > 0:
+            side = "BUY"
+        elif vn < 0:
+            side = "SELL"
+        else:
+            side = "BUY"  # FreeLLM pourra reject
+
+    levels = _ea_guess_levels(sym, side)
+    conf = 0.55
+    if abs(vn) >= 3:
+        conf = 0.85
+    elif abs(vn) >= 2:
+        conf = 0.75
+    elif abs(vn) == 1:
+        conf = 0.60
+
+    summary = (
+        f"PsychoBot propose {sym} {side} via {ea}. "
+        f"GOM={verdict} vn={vn} coh={gom.get('coherence', 'n/a')} "
+        f"px={levels.get('price')} atr≈{levels.get('atr')}"
+    )
+    sl_req = SecondLookRequest(
+        ea=ea,
+        symbol=sym,
+        side=side,
+        order_kind=req.order_kind or "limit",
+        confidence=conf,
+        confluence=float(gom.get("coherence") or 0) / 100.0 if gom.get("coherence") else 0.0,
+        score=float(abs(vn)),
+        entry=levels.get("entry"),
+        sl=levels.get("sl"),
+        tp=levels.get("tp"),
+        conf_tags=f"gom={verdict}",
+        regime=str(gom.get("regime") or ""),
+        summary=summary,
+        force=True,
+    )
+    look = await ml_second_look(sl_req)
+    action = str(look.get("action") or "reject").lower()
+    entry = look.get("entry", levels.get("entry"))
+    sl = look.get("sl", levels.get("sl"))
+    tp = look.get("tp", levels.get("tp"))
+    reason = str(look.get("reason") or "")[:400]
+
+    if action == "reject":
+        msg = (
+            f"ANALYSE {sym} — FreeLLM REJECT\n"
+            f"EA={ea} GOM={verdict} (vn={vn})\n"
+            f"{reason}\n"
+            f"_Aucun ordre proposé._"
+        )
+        _freellm_wa_notify(f"propose_reject_{sym}", msg)
+        return {
+            "ok": True,
+            "symbol": sym,
+            "action": "reject",
+            "analysis": look,
+            "gom": {"verdict": verdict, "verdict_num": vn},
+            "proposal": None,
+            "whatsapp": True,
+            "author": "Sidouan Yeba",
+        }
+
+    # keep / adjust → proposition en attente d'approbation WhatsApp
+    prop_id = str(uuid.uuid4())[:10]
+    proposal = {
+        "id": prop_id,
+        "ts": time.time(),
+        "ea": ea,
+        "symbol": sym,
+        "side": side,
+        "order_kind": (req.order_kind or "limit").lower(),
+        "entry": entry,
+        "sl": sl,
+        "tp": tp,
+        "confidence": conf,
+        "reason": f"freellm:{action} {reason}"[:400],
+        "gom_verdict": verdict,
+        "gom_vn": vn,
+        "freellm_action": action,
+        "status": "awaiting_approval",
+    }
+    queued = None
+    if req.require_approval:
+        _ea_proposal_purge()
+        _EA_PROPOSALS[sym] = proposal
+        msg = (
+            f"PROPOSITION TRADE [{prop_id}]\n"
+            f"{ea} | {sym} | {side} {(req.order_kind or 'limit').upper()}\n"
+            f"GOM {verdict} (vn={vn}) | FreeLLM {action}\n"
+            f"Entry {entry} | SL {sl} | TP {tp}\n"
+            f"{reason}\n"
+            f"————————————\n"
+            f"Réponds: *OUI {sym}* pour placer\n"
+            f"ou *NON {sym}* pour annuler\n"
+            f"(risque / lot = EA local)"
+        )
+        _freellm_wa_notify(f"propose_{sym}", msg)
+    else:
+        queued = _ea_cmd_enqueue(
+            {
+                "ea": ea,
+                "symbol": sym,
+                "side": side,
+                "order_kind": proposal["order_kind"],
+                "entry": entry,
+                "sl": sl,
+                "tp": tp,
+                "confidence": conf,
+                "reason": proposal["reason"],
+                "source": "psychobot-auto",
+            }
+        )
+        _freellm_wa_notify(
+            f"propose_auto_{sym}",
+            f"AUTO enqueue [{queued['id']}]\n{ea} {sym} {side}",
+        )
+
+    return {
+        "ok": True,
+        "symbol": sym,
+        "action": action,
+        "analysis": look,
+        "gom": {"verdict": verdict, "verdict_num": vn},
+        "proposal": proposal,
+        "queued": queued,
+        "awaiting_approval": bool(req.require_approval),
+        "whatsapp": True,
+        "author": "Sidouan Yeba",
+    }
+
+
+@app.get("/ea/proposals")
+async def ea_list_proposals():
+    _ea_proposal_purge()
+    return {"ok": True, "proposals": list(_EA_PROPOSALS.values()), "count": len(_EA_PROPOSALS)}
+
+
+@app.post("/ea/analyze-opportunity")
+async def ea_analyze_opportunity(req: EaAnalyzeOpportunity):
+    """
+    Pipeline: FreeLLM second-look → WhatsApp → enqueue EA command on keep/adjust.
+    Does NOT size lots or bypass EA risk.
+    Préférer /ea/propose-trade + /approval pour confirmation humaine.
+    """
+    sl_req = SecondLookRequest(
+        ea=req.ea,
+        symbol=req.symbol,
+        side=req.side,
+        order_kind=req.order_kind,
+        confidence=req.confidence,
+        confluence=req.confluence,
+        score=req.score,
+        entry=req.entry,
+        sl=req.sl,
+        tp=req.tp,
+        conf_tags=req.conf_tags,
+        regime=req.regime,
+        summary=req.summary or f"opportunity {req.symbol} {req.side}",
+        force=True,
+    )
+    look = await ml_second_look(sl_req)
+    action = str(look.get("action") or "reject").lower()
+    entry = look.get("entry", req.entry)
+    sl = look.get("sl", req.sl)
+    tp = look.get("tp", req.tp)
+    reason = str(look.get("reason") or "")[:400]
+
+    msg = (
+        f"ANALYSE FreeLLM [{req.symbol}]\n"
+        f"EA={req.ea} {req.side} {req.order_kind}\n"
+        f"action={action}\n"
+        f"entry={entry} sl={sl} tp={tp}\n"
+        f"conf={req.confidence:.2f} regime={req.regime}\n"
+        f"{reason}"
+    )
+    _freellm_wa_notify(f"opp_{req.symbol}_{req.side}", msg)
+
+    queued = None
+    if req.enqueue_on_keep and EA_CMD_AUTO_ENQUEUE and action in ("keep", "adjust"):
+        queued = _ea_cmd_enqueue(
+            {
+                "ea": req.ea,
+                "symbol": req.symbol,
+                "side": req.side,
+                "order_kind": req.order_kind,
+                "entry": entry,
+                "sl": sl,
+                "tp": tp,
+                "confidence": req.confidence,
+                "reason": f"freellm:{action} {reason}",
+                "source": "freellm",
+            }
+        )
+        _freellm_wa_notify(
+            f"queue_{req.symbol}",
+            f"Commande EA créée [{queued['id']}]\n{req.ea} exécutera sous risque local",
+        )
+
+    return {
+        "ok": True,
+        "analysis": look,
+        "action": action,
+        "queued": queued,
+        "whatsapp": True,
+        "author": "Sidouan Yeba",
+    }
+
+
+@app.get("/ea/commands/health")
+async def ea_commands_health():
+    with _EA_CMD_LOCK:
+        pending = sum(1 for c in _EA_COMMANDS if c.get("status") == "pending")
+        total = len(_EA_COMMANDS)
+    return {
+        "ok": True,
+        "pending": pending,
+        "total": total,
+        "ttl_sec": EA_CMD_TTL_SEC,
+        "auto_enqueue": EA_CMD_AUTO_ENQUEUE,
+        "author": "Sidouan Yeba",
+    }
+
+
 if __name__ == "__main__":
     import signal
     import uvicorn
@@ -33297,6 +35030,13 @@ if __name__ == "__main__":
         loop = asyncio.get_running_loop()
         loop.set_exception_handler(_global_exception_handler)
         logger.info("✅ Global exception handler installed (WinError 64/10053/10054 suppression)")
+
+    @app.on_event("startup")
+    async def _start_shadow_analysis():
+        """Démarrer l'analyse périodique Shadow ICT si disponible"""
+        if SHADOW_ANALYZER_AVAILABLE and shadow_analyzer:
+            logger.info("🚀 Démarrage de l'analyse périodique Shadow ICT (toutes les heures)")
+            asyncio.create_task(periodic_shadow_analysis())
 
     _abort_if_port_busy(HOST, API_PORT)
     try:
