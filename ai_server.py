@@ -28,7 +28,34 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional, List, Dict, Any, Tuple, Set, Union
 from backend.trade_statistics import build_strategy_trade_stats
-from mt5_candle_validation import normalize_mt5_candles
+try:
+    from mt5_candle_validation import normalize_mt5_candles
+except ImportError:  # Render/cloud: module may ship one deploy late — fail-open stub
+    def normalize_mt5_candles(candles):  # type: ignore[misc]
+        if not isinstance(candles, (list, tuple)):
+            raise ValueError("candles must be a list of rows")
+        rows = []
+        for row in candles:
+            try:
+                if isinstance(row, dict):
+                    t = int(float(row.get("time") or 0))
+                    o = float(row.get("open")); h = float(row.get("high"))
+                    l = float(row.get("low")); c = float(row.get("close"))
+                    v = float(row.get("volume") or 0)
+                elif isinstance(row, (list, tuple)) and len(row) >= 5:
+                    t = int(float(row[0])); o = float(row[1]); h = float(row[2])
+                    l = float(row[3]); c = float(row[4])
+                    v = float(row[5]) if len(row) > 5 else 0.0
+                else:
+                    continue
+                if t > 0 and min(o, h, l, c) > 0:
+                    rows.append((t, o, h, l, c, v))
+            except (TypeError, ValueError):
+                continue
+        if not rows:
+            raise ValueError("no valid candles after validation")
+        rows.sort(key=lambda r: r[0])
+        return rows, {"invalid_candles_dropped": 0, "duplicate_candles_dropped": 0}
 
 import socket
 import sys
